@@ -1,0 +1,936 @@
+import express from "express";
+import cors from "cors";
+import { GithubService } from "../services/github-service.js";
+import { NodeService } from "../services/node-service.js";
+import { logger } from "../utils/logger.js";
+import jwt from "jsonwebtoken";
+import { Mongodb, MongoDbTypes } from "../database/db.js";
+import { SSHService } from "../services/ssh-service.js";
+import { checkLink } from "../utils/common.js";
+import { v4 as uuidv4 } from "uuid";
+
+declare global {
+    namespace Express {
+        interface Request {
+            user?: {
+                username?: string;
+                role?: string;
+            };
+        }
+    }
+}
+
+namespace MiddleWare {
+    // Middleware to verify JWT token
+    export function authenticateToken(
+        req: express.Request,
+        res: express.Response,
+        next: express.NextFunction
+    ) {
+        const authHeader = req.headers["authorization"];
+        const token = authHeader && authHeader.split(" ")[1];
+
+        if (!token) {
+            return res.status(401).json({ error: "Missing token" });
+        }
+
+        jwt.verify(
+            token,
+            process.env.JWT_SECRET as string,
+            (err, user: any) => {
+                if (err) {
+                    return res.status(403).json({ error: "Invalid token" });
+                }
+                req.user = user;
+                next();
+            }
+        );
+    }
+}
+
+namespace HttpServer {
+    export async function start() {
+        const app = express();
+        app.use(express.json());
+        app.use(cors());
+        const port = process.env.PORT || 3000;
+
+        app.get("/", (req, res) => {
+            res.send("Qubic iz da bes’, homie!");
+        });
+
+        app.get("/servers", (req, res) => {
+            let servers: string[] =
+                GithubService.getVariable("SERVERS").split(" ");
+            for (let i = 0; i < servers.length; i++) {
+                if (!servers[i]) continue;
+
+                servers[i] = servers[i]!.trim().split("@")[1] as string;
+            }
+
+            res.json({ servers });
+        });
+
+        app.get("/servers-status", (req, res) => {
+            let operator = req.query.operator as string | undefined;
+            let statuses = NodeService.getStatus();
+            if (operator) {
+                // Filter statuses by operator
+                statuses.liteNodes = statuses.liteNodes.filter(
+                    (status) => status.operator === operator
+                );
+                statuses.bobNodes = statuses.bobNodes.filter(
+                    (status) => status.operator === operator
+                );
+            }
+            res.json({ statuses });
+        });
+
+        app.get("/request-shudown", async (req, res) => {
+            let server = req.query.server as string;
+            if (!server) {
+                res.status(400).json({
+                    error: "Missing 'server' query parameter",
+                });
+                return;
+            }
+
+            let ok = await NodeService.requestShudownLiteNode(server);
+            if (ok) {
+                res.json({ message: `Shutdown request sent to ${server}` });
+            } else {
+                res.status(500).json({
+                    error: `Failed to send shutdown request to ${server}`,
+                });
+            }
+        });
+
+        app.get("/request-shutdown-all", async (req, res) => {
+            let result = await NodeService.requestShutdownAllLiteNodes();
+            res.json(result);
+        });
+
+        app.post("/command", MiddleWare.authenticateToken, async (req, res) => {
+            let command: "shutdown" | "restart" = req.body.command;
+            let services: MongoDbTypes.ServiceType[] = req.body.services;
+            let servers: string[] = req.body.servers;
+
+            let operator = req.user!.username;
+            if (!operator) {
+                res.status(400).json({ error: "No operator found" });
+                return;
+            }
+
+            // Get server details from DB
+            let serverDocs = await Mongodb.getServersCollection()
+                .find({
+                    server: { $in: servers },
+                    operator,
+                })
+                .toArray();
+
+            if (servers.length === 0 || serverDocs.length !== servers.length) {
+                res.status(404).json({
+                    error: "No matching servers found in the database",
+                });
+                return;
+            }
+
+            let currentUUID = uuidv4();
+            await Mongodb.getCommandLogsCollection().insertOne({
+                operator: operator,
+                command: "shutdown " + services.join(", "),
+                stdout: "",
+                stderr: "",
+                timestamp: Date.now(),
+                status: "pending",
+                uuid: currentUUID,
+                isStandardCommand: true,
+            });
+
+            if (command == "shutdown") {
+                for (let service of services) {
+                    for (let serverObject of serverDocs) {
+                        SSHService.shutdownNode(
+                            serverObject.server,
+                            serverObject.username,
+                            serverObject.password,
+                            service
+                        )
+                            .then(async ({ stdouts, stderrs, isSuccess }) => {
+                                if (isSuccess) {
+                                    let currentLogDbObj =
+                                        await Mongodb.getCommandLogsCollection().findOne(
+                                            { uuid: currentUUID }
+                                        );
+                                    Mongodb.getCommandLogsCollection().updateOne(
+                                        {
+                                            uuid: currentUUID,
+                                        },
+                                        {
+                                            $set: {
+                                                stdout:
+                                                    currentLogDbObj?.stdout ||
+                                                    "" +
+                                                        "\n" +
+                                                        `---------- Shutdown successful for ${service} on ${serverObject.server} ----------- \n\n` +
+                                                        Object.values(
+                                                            stdouts
+                                                        ).join("\n"),
+                                                stderr: Object.values(
+                                                    stderrs
+                                                ).join("\n"),
+                                                status: "completed",
+                                            },
+                                        }
+                                    );
+                                }
+                            })
+                            .catch((error) => {
+                                Mongodb.getCommandLogsCollection().updateOne(
+                                    {
+                                        uuid: currentUUID,
+                                    },
+                                    {
+                                        $set: {
+                                            stdout: "",
+                                            stderr: (error as Error).message,
+                                            status: "failed",
+                                        },
+                                    }
+                                );
+                            });
+                    }
+                }
+            } else if (command == "restart") {
+                for (let service of services) {
+                    for (let serverObject of serverDocs) {
+                        SSHService.restartNode(
+                            serverObject.server,
+                            serverObject.username,
+                            serverObject.password,
+                            service
+                        );
+                    }
+                }
+            } else {
+                res.status(400).json({ error: "Invalid command" });
+                return;
+            }
+
+            res.json({ message: "Command sent successfully" });
+        });
+
+        app.get("/github-tags", (req, res) => {
+            let tags = GithubService.getGithubTags();
+            res.json(tags);
+        });
+
+        app.post("/deploy", async (req, res) => {
+            let servers: string[] = req.body.servers;
+            let service: MongoDbTypes.ServiceType = req.body.service;
+            let tag: string = req.body.tag;
+            let extraData: {
+                epochFile?: string;
+                peers?: string[];
+            } = req.body.extraData;
+
+            let binaryFileMap = {
+                liteNode: "Qubic",
+                bobNode: "bob",
+            };
+
+            let binaryUrl: string = GithubService.getDownloadUrlForTag(
+                tag,
+                binaryFileMap[service as keyof typeof binaryFileMap]
+            );
+            // Validate input
+            if (!servers || !Array.isArray(servers) || servers.length === 0) {
+                res.status(400).json({
+                    error: "Invalid or missing 'servers' in request body",
+                });
+                return;
+            }
+            if (
+                !service ||
+                !Object.values(MongoDbTypes.ServiceType).includes(service)
+            ) {
+                res.status(400).json({
+                    error: "Invalid or missing 'service' in request body",
+                });
+                return;
+            }
+            if (!binaryUrl || typeof binaryUrl !== "string") {
+                res.status(400).json({
+                    error: "Invalid or missing 'binaryUrl' in request body",
+                });
+                return;
+            }
+            if (service === MongoDbTypes.ServiceType.LiteNode) {
+                if (!extraData.epochFile || !extraData.peers) {
+                    res.status(400).json({
+                        error: "Missing 'epochFile' or 'peers' in extraData for Lite Node deployment",
+                    });
+                    return;
+                }
+
+                let isEpochFileValid = await checkLink(extraData.epochFile);
+                if (!isEpochFileValid) {
+                    res.status(400).json({
+                        error: "The provided 'epochFile' URL is not accessible",
+                    });
+                    return;
+                }
+            }
+
+            // Get server details from DB
+            let serverDocs = await Mongodb.getServersCollection()
+                .find({ server: { $in: servers } })
+                .toArray();
+            if (
+                serverDocs.length === 0 ||
+                serverDocs.length !== servers.length
+            ) {
+                res.status(404).json({
+                    error: "No matching servers found in the database",
+                });
+                return;
+            }
+
+            // Deploy to each server
+            try {
+                for (let server of serverDocs) {
+                    SSHService.deployNode(
+                        server.server,
+                        server!.username,
+                        server!.password,
+                        service,
+                        {
+                            binaryUrl,
+                            epochFile: extraData?.epochFile as string,
+                            peers: extraData?.peers as string[],
+                        }
+                    )
+                        .then((result) => {
+                            if (result.isSuccess) {
+                                Mongodb.getServersCollection().updateOne(
+                                    { server: server.server },
+                                    {
+                                        $set: {
+                                            deployStatus: {
+                                                ...server.deployStatus,
+                                                [service]: "active",
+                                            },
+                                            deployLogs: {
+                                                ...server.deployLogs,
+                                                [service]: {
+                                                    stdout: Object.values(
+                                                        result.stdouts
+                                                    ).join("\n"),
+                                                    stderr: Object.values(
+                                                        result.stderrs
+                                                    ).join("\n"),
+                                                },
+                                            },
+                                        },
+                                    }
+                                );
+                            } else {
+                                logger.error(`Deployment to ${server} failed.`);
+                                Mongodb.getServersCollection().updateOne(
+                                    { server: server.server },
+                                    {
+                                        $set: {
+                                            deployStatus: {
+                                                ...server.deployStatus,
+                                                [service]: "error",
+                                            },
+                                            deployLogs: {
+                                                ...server.deployLogs,
+                                                [service]: {
+                                                    stdout: Object.values(
+                                                        result.stdouts
+                                                    ).join("\n"),
+                                                    stderr: Object.values(
+                                                        result.stderrs
+                                                    ).join("\n"),
+                                                },
+                                            },
+                                        },
+                                    }
+                                );
+                            }
+                        })
+                        .catch((error) => {
+                            logger.error(
+                                `Deployment to ${server} failed: ${
+                                    (error as Error).message
+                                }`
+                            );
+                            Mongodb.getServersCollection().updateOne(
+                                { server: server.server },
+                                {
+                                    $set: {
+                                        deployStatus: {
+                                            ...server.deployStatus,
+                                            [service]: "error",
+                                        },
+                                        deployLogs: {
+                                            ...server.deployLogs,
+                                            [service]: {
+                                                stdout: "",
+                                                stderr: (error as Error)
+                                                    .message,
+                                            },
+                                        },
+                                    },
+                                }
+                            );
+                        });
+                }
+            } catch (error) {
+                res.status(500).json({
+                    error: "Failed to deploy: " + (error as Error).message,
+                });
+            }
+
+            res.json({ message: "Deployment initiated" });
+        });
+
+        app.post("/login", async (req, res) => {
+            try {
+                const { username, passwordHash } = req.body;
+                if (!username || !passwordHash) {
+                    res.status(400).json({
+                        error: "Missing username or passwordHash",
+                    });
+                    return;
+                }
+
+                const user = await Mongodb.tryLogin(username, passwordHash);
+                if (!user) {
+                    res.status(401).json({ error: "Invalid credentials" });
+                    return;
+                }
+
+                const token = jwt.sign(
+                    { username: user.username, role: user.role },
+                    process.env.JWT_SECRET as string
+                );
+                res.json({ token });
+            } catch (error) {
+                logger.error(`Login error: ${(error as Error).message}`);
+                res.status(500).json({ error: "Internal server error" });
+                return;
+            }
+        });
+
+        app.post("/register", async (req, res) => {
+            try {
+                if (!req.user || req.user.role !== "admin") {
+                    res.status(403).json({
+                        error: "Admin privileges required",
+                    });
+                    return;
+                }
+                const { username, passwordHash, role } = req.body;
+                if (!username || !passwordHash || !role) {
+                    res.status(400).json({
+                        error: "Missing username, passwordHash, or role",
+                    });
+                    return;
+                }
+
+                await Mongodb.createUser({ username, passwordHash, role });
+                res.json({ message: "User registered successfully" });
+            } catch (error) {
+                logger.error(`Registration error: ${(error as Error).message}`);
+                res.status(500).json({ error: "Internal server error" });
+                return;
+            }
+        });
+
+        app.post(
+            "/new-servers",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                let serversData: {
+                    ip: string;
+                    username: string;
+                    password: string;
+                    services: {
+                        liteNode: boolean;
+                        bobNode: boolean;
+                    };
+                }[] = req.body;
+                let operator = req.user?.username;
+
+                let serversDataNormalized: MongoDbTypes.Server[] =
+                    serversData.map((server) => ({
+                        server: server.ip,
+                        operator: operator as string,
+                        username: server.username,
+                        password: server.password,
+                        services: [
+                            server.services.liteNode
+                                ? MongoDbTypes.ServiceType.LiteNode
+                                : MongoDbTypes.ServiceType.null,
+                            server.services.bobNode
+                                ? MongoDbTypes.ServiceType.BobNode
+                                : MongoDbTypes.ServiceType.null,
+                        ].filter(
+                            (s) => s !== "null"
+                        ) as MongoDbTypes.ServiceType[],
+                        status: "setting_up",
+                    }));
+
+                if (!operator) {
+                    res.status(400).json({
+                        error: "No operator found",
+                    });
+                    return;
+                }
+
+                try {
+                    await Mongodb.getServersCollection().insertMany(
+                        serversDataNormalized
+                    );
+
+                    // Do set up for servers
+                    for (let serverData of serversDataNormalized) {
+                        SSHService.setupNode(
+                            serverData.server,
+                            serverData.username,
+                            serverData.password
+                        )
+                            .then((result) => {
+                                if (result.isSuccess) {
+                                    Mongodb.getServersCollection().updateOne(
+                                        { server: serverData.server },
+                                        {
+                                            $set: {
+                                                cpu: result.cpu,
+                                                os: result.os,
+                                                ram: result.ram,
+                                                status: "active",
+                                                setupLogs: {
+                                                    stdout: Object.values(
+                                                        result.stdouts
+                                                    ).join("\n"),
+                                                    stderr: Object.values(
+                                                        result.stderrs
+                                                    ).join("\n"),
+                                                },
+                                            },
+                                        }
+                                    );
+                                } else {
+                                    Mongodb.getServersCollection().updateOne(
+                                        { server: serverData.server },
+                                        {
+                                            $set: {
+                                                status: "error",
+                                                setupLogs: {
+                                                    stdout: Object.values(
+                                                        result.stdouts
+                                                    ).join("\n"),
+                                                    stderr: Object.values(
+                                                        result.stderrs
+                                                    ).join("\n"),
+                                                },
+                                            },
+                                        }
+                                    );
+                                }
+                            })
+                            .catch((error) => {
+                                Mongodb.getServersCollection().updateOne(
+                                    { server: serverData.server },
+                                    {
+                                        $set: {
+                                            status: "error",
+                                            setupLogs: {
+                                                stdout: "",
+                                                stderr: (error as Error)
+                                                    .message,
+                                            },
+                                        },
+                                    }
+                                );
+                            });
+                    }
+                } catch (error) {
+                    logger.error(
+                        `Error adding new servers: ${(error as Error).message}`
+                    );
+                    res.status(500).json({
+                        error: "Failed to add new servers " + error,
+                    });
+                    return;
+                }
+
+                res.json({ message: "Servers added successfully" });
+            }
+        );
+
+        app.get(
+            "/my-servers",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+
+                    let servers = await Mongodb.getServersCollection()
+                        .find({ operator: operator })
+                        .project({
+                            _id: 0,
+                            password: 0,
+                            setupLogs: 0,
+                        })
+                        .toArray();
+                    res.json({ servers });
+                } catch (error) {
+                    logger.error(
+                        `Error fetching my servers: ${(error as Error).message}`
+                    );
+                    res.status(500).json({
+                        error: "Failed to fetch servers " + error,
+                    });
+                }
+            }
+        );
+
+        app.get(
+            "/setup-logs",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let server = req.query.server as string;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (!server) {
+                        res.status(400).json({ error: "No server specified" });
+                        return;
+                    }
+
+                    let serverDoc =
+                        await Mongodb.getServersCollection().findOne(
+                            {
+                                server: server,
+                                operator: operator,
+                            },
+                            {
+                                projection: {
+                                    _id: 0,
+                                    setupLogs: 1,
+                                    deployLogs: 1,
+                                },
+                            }
+                        );
+                    if (!serverDoc) {
+                        res.status(404).json({ error: "Server not found" });
+                        return;
+                    }
+
+                    res.json({
+                        setupLogs: serverDoc.setupLogs || {},
+                        deployLogs: serverDoc.deployLogs || {},
+                    });
+                } catch (error) {
+                    logger.error(
+                        `Error fetching setup logs: ${(error as Error).message}`
+                    );
+                    res.status(500).json({
+                        error: "Failed to fetch setup logs " + error,
+                    });
+                }
+            }
+        );
+
+        app.post(
+            "/delete-server",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let server = req.body.server as string;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (!server) {
+                        res.status(400).json({ error: "No server specified" });
+                        return;
+                    }
+
+                    await Mongodb.getServersCollection().deleteOne({
+                        server: server,
+                        operator: operator,
+                    });
+                    res.json({ message: "Server deleted successfully" });
+                } catch (error) {
+                    logger.error(
+                        `Error deleting server: ${(error as Error).message}`
+                    );
+                    res.status(500).json({
+                        error: "Failed to delete server " + error,
+                    });
+                }
+            }
+        );
+
+        app.post("/refresh-github-tags", async (req, res) => {
+            try {
+                await GithubService.pullTagsFromGithub();
+                let tags = GithubService.getGithubTags();
+                res.json(tags);
+            } catch (error) {
+                logger.error(
+                    `Error refreshing GitHub tags: ${(error as Error).message}`
+                );
+                res.status(500).json({
+                    error: "Failed to refresh GitHub tags " + error,
+                });
+            }
+        });
+
+        app.get(
+            "/command-logs",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+
+                    let commandLogs = await Mongodb.getCommandLogsCollection()
+                        .find({ operator: operator })
+                        .sort({ timestamp: -1 })
+                        .project({
+                            _id: 0,
+                        })
+                        .toArray();
+                    res.json({ commandLogs });
+                } catch (error) {
+                    logger.error(
+                        `Error fetching command logs: ${
+                            (error as Error).message
+                        }`
+                    );
+                    res.status(500).json({
+                        error: "Failed to fetch command logs " + error,
+                    });
+                }
+            }
+        );
+
+        app.post(
+            "/delete-command-log",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let uuid = req.body.uuid as string;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (!uuid) {
+                        res.status(400).json({ error: "No uuid specified" });
+                        return;
+                    }
+
+                    await Mongodb.getCommandLogsCollection().deleteOne({
+                        uuid: uuid,
+                        operator: operator,
+                    });
+                    res.json({ message: "Command log deleted successfully" });
+                } catch (error) {
+                    logger.error(
+                        `Error deleting command log: ${
+                            (error as Error).message
+                        }`
+                    );
+                    res.status(500).json({
+                        error: "Failed to delete command log " + error,
+                    });
+                }
+            }
+        );
+
+        app.post(
+            "/delete-all-command-logs",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+
+                    await Mongodb.getCommandLogsCollection().deleteMany({
+                        operator: operator,
+                    });
+                    res.json({
+                        message: "All command logs deleted successfully",
+                    });
+                } catch (error) {
+                    logger.error(
+                        `Error deleting all command logs: ${
+                            (error as Error).message
+                        }`
+                    );
+                    res.status(500).json({
+                        error: "Failed to delete all command logs " + error,
+                    });
+                }
+            }
+        );
+
+        app.post(
+            "/execute-command",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let command = req.body.command as string;
+                    let servers = req.body.servers as string[];
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (!command || !servers) {
+                        res.status(400).json({
+                            error: "Missing command or servers",
+                        });
+                        return;
+                    }
+
+                    let serverDocs = await Mongodb.getServersCollection()
+                        .find({
+                            server: { $in: servers },
+                            operator,
+                        })
+                        .toArray();
+
+                    if (
+                        serverDocs.length === 0 ||
+                        serverDocs.length !== servers.length
+                    ) {
+                        res.status(404).json({
+                            error: "No matching servers found in the database",
+                        });
+                        return;
+                    }
+
+                    let currentUUID = uuidv4();
+                    await Mongodb.getCommandLogsCollection().insertOne({
+                        operator: operator,
+                        command: command,
+                        stdout: "",
+                        stderr: "",
+                        timestamp: Date.now(),
+                        status: "pending",
+                        uuid: currentUUID,
+                        isStandardCommand: false,
+                    });
+
+                    for (let serverObject of serverDocs) {
+                        SSHService.executeCommands(
+                            serverObject.server,
+                            serverObject.username,
+                            serverObject.password,
+                            [command],
+                            30_000
+                        )
+                            .then(async (result) => {
+                                if (result.isSuccess) {
+                                    let currentLogDbObj =
+                                        await Mongodb.getCommandLogsCollection().findOne(
+                                            { uuid: currentUUID }
+                                        );
+                                    Mongodb.getCommandLogsCollection().updateOne(
+                                        {
+                                            uuid: currentUUID,
+                                        },
+                                        {
+                                            $set: {
+                                                stdout:
+                                                    (currentLogDbObj?.stdout ||
+                                                        "") +
+                                                    "\n" +
+                                                    `---------- Command output for ${serverObject.server} ----------- \n\n` +
+                                                    Object.values(
+                                                        result.stdouts
+                                                    ).join("\n"),
+                                                stderr: Object.values(
+                                                    result.stderrs
+                                                ).join("\n"),
+                                                status: "completed",
+                                            },
+                                        }
+                                    );
+                                } else {
+                                    Mongodb.getCommandLogsCollection().updateOne(
+                                        {
+                                            uuid: currentUUID,
+                                        },
+                                        {
+                                            $set: {
+                                                stdout: "",
+                                                stderr: Object.values(
+                                                    result.stderrs
+                                                ).join("\n"),
+                                                status: "failed",
+                                            },
+                                        }
+                                    );
+                                }
+                            })
+                            .catch((error) => {
+                                Mongodb.getCommandLogsCollection().updateOne(
+                                    {
+                                        uuid: currentUUID,
+                                    },
+                                    {
+                                        $set: {
+                                            stdout: "",
+                                            stderr: (error as Error).message,
+                                            status: "failed",
+                                        },
+                                    }
+                                );
+                            });
+                    }
+
+                    res.json({
+                        message: "Command execution initiated",
+                    });
+                } catch (error) {
+                    logger.error(
+                        `Error executing command: ${(error as Error).message}`
+                    );
+                    res.status(500).json({
+                        error: "Failed to execute command " + error,
+                    });
+                }
+            }
+        );
+
+        app.listen(port, () => {
+            logger.info(`HTTP Server is running at http://localhost:${port}`);
+        });
+    }
+}
+
+export { HttpServer };

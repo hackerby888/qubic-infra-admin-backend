@@ -4,7 +4,6 @@ import { HttpServer } from "./http/http-server.js";
 import { NodeService } from "./services/node-service.js";
 import { Mongodb } from "./database/db.js";
 import { SSHService } from "./services/ssh-service.js";
-import fs from "fs";
 
 function checkEnvVariables() {
     const requiredVars = [
@@ -25,14 +24,6 @@ function checkEnvVariables() {
 }
 
 async function main() {
-    // let out = await SSHService.setupNode(
-    //     "194.34.238.128",
-    //     "root",
-    //     fs.readFileSync("/home/kali/.ssh/id_ed25519", "utf-8"),
-    //     "lite"
-    // );
-    // console.log(out);
-    // console.log(SSHService.getSetupCommands("lite"));
     checkEnvVariables();
     await Mongodb.connectDB();
     await GithubService.start();

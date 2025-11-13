@@ -11,6 +11,10 @@ export namespace SSHService {
     const LITE_SCREEN_NAME = "qubic";
     const BOB_SCREEN_NAME = "bob";
 
+    let _isExecutingCommandsMap: {
+        [key: string]: boolean;
+    } = {};
+
     const Scripts = {
         GeneralSetupPath: path.resolve(
             process.cwd(),
@@ -109,6 +113,18 @@ export namespace SSHService {
         os: `grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '"'`,
         ram: `free -h | grep Mem | awk '{print $2}'`,
     };
+
+    export async function _accquireExecutionLock(host: string) {
+        while (_isExecutingCommandsMap[host]) {
+            // Wait if there is an ongoing execution for the same host and username
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        _isExecutingCommandsMap[host] = true;
+    }
+
+    export async function _releaseExecutionLock(host: string) {
+        _isExecutingCommandsMap[host] = false;
+    }
 
     export function getSetupCommands() {
         try {
@@ -324,6 +340,8 @@ export namespace SSHService {
         commands: string[],
         timeout: number = 0
     ) {
+        await _accquireExecutionLock(host);
+
         let stdouts: {
             // command: output;
             [key: string]: string;
@@ -404,6 +422,12 @@ export namespace SSHService {
             );
         }
 
+        await _releaseExecutionLock(host);
         return { stdouts, stderrs, isSuccess };
+    }
+
+    export async function startRequestExecuteCommandsProcessor() {
+        // Currently, executeCommands is called directly in each API request handler.
+        // If needed, implement a queue processor here to handle requests sequentially.
     }
 }

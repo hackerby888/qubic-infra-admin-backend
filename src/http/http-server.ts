@@ -111,114 +111,150 @@ namespace HttpServer {
         });
 
         app.post("/command", MiddleWare.authenticateToken, async (req, res) => {
-            let command: "shutdown" | "restart" = req.body.command;
-            let services: MongoDbTypes.ServiceType[] = req.body.services;
-            let servers: string[] = req.body.servers;
+            try {
+                let command: "shutdown" | "restart" = req.body.command;
+                let services: MongoDbTypes.ServiceType[] = req.body.services;
+                let servers: string[] = req.body.servers;
 
-            let operator = req.user!.username;
-            if (!operator) {
-                res.status(400).json({ error: "No operator found" });
-                return;
-            }
+                let operator = req.user!.username;
+                if (!operator) {
+                    res.status(400).json({ error: "No operator found" });
+                    return;
+                }
 
-            // Get server details from DB
-            let serverDocs = await Mongodb.getServersCollection()
-                .find({
-                    server: { $in: servers },
-                    operator,
-                })
-                .toArray();
+                // Get server details from DB
+                let serverDocs = await Mongodb.getServersCollection()
+                    .find({
+                        server: { $in: servers },
+                        operator,
+                    })
+                    .toArray();
 
-            if (servers.length === 0 || serverDocs.length !== servers.length) {
-                res.status(404).json({
-                    error: "No matching servers found in the database",
+                if (
+                    servers.length === 0 ||
+                    serverDocs.length !== servers.length
+                ) {
+                    res.status(404).json({
+                        error: "No matching servers found in the database",
+                    });
+                    return;
+                }
+
+                let currentUUID = uuidv4();
+                await Mongodb.getCommandLogsCollection().insertOne({
+                    operator: operator,
+                    command: "shutdown " + services.join(", "),
+                    stdout: "",
+                    stderr: "",
+                    timestamp: Date.now(),
+                    status: "pending",
+                    uuid: currentUUID,
+                    isStandardCommand: true,
                 });
-                return;
-            }
 
-            let currentUUID = uuidv4();
-            await Mongodb.getCommandLogsCollection().insertOne({
-                operator: operator,
-                command: "shutdown " + services.join(", "),
-                stdout: "",
-                stderr: "",
-                timestamp: Date.now(),
-                status: "pending",
-                uuid: currentUUID,
-                isStandardCommand: true,
-            });
-
-            if (command == "shutdown") {
-                for (let service of services) {
-                    for (let serverObject of serverDocs) {
-                        SSHService.shutdownNode(
-                            serverObject.server,
-                            serverObject.username,
-                            serverObject.password,
-                            service
-                        )
-                            .then(async ({ stdouts, stderrs, isSuccess }) => {
-                                if (isSuccess) {
-                                    let currentLogDbObj =
-                                        await Mongodb.getCommandLogsCollection().findOne(
-                                            { uuid: currentUUID }
-                                        );
-                                    Mongodb.getCommandLogsCollection().updateOne(
-                                        {
-                                            uuid: currentUUID,
-                                        },
-                                        {
-                                            $set: {
-                                                stdout:
-                                                    currentLogDbObj?.stdout ||
-                                                    "" +
-                                                        "\n" +
-                                                        `---------- Shutdown successful for ${service} on ${serverObject.server} ----------- \n\n` +
-                                                        Object.values(
-                                                            stdouts
-                                                        ).join("\n"),
-                                                stderr: Object.values(
-                                                    stderrs
-                                                ).join("\n"),
-                                                status: "completed",
-                                            },
+                if (command == "shutdown") {
+                    for (let service of services) {
+                        for (let serverObject of serverDocs) {
+                            SSHService.shutdownNode(
+                                serverObject.server,
+                                serverObject.username,
+                                serverObject.password,
+                                service
+                            )
+                                .then(
+                                    async ({ stdouts, stderrs, isSuccess }) => {
+                                        if (isSuccess) {
+                                            let currentLogDbObj =
+                                                await Mongodb.getCommandLogsCollection()
+                                                    .findOne({
+                                                        uuid: currentUUID,
+                                                    })
+                                                    .then()
+                                                    .catch(() => null);
+                                            Mongodb.getCommandLogsCollection()
+                                                .updateOne(
+                                                    {
+                                                        uuid: currentUUID,
+                                                    },
+                                                    {
+                                                        $set: {
+                                                            stdout:
+                                                                currentLogDbObj?.stdout ||
+                                                                "" +
+                                                                    "\n" +
+                                                                    `---------- Shutdown successful for ${service} on ${serverObject.server} ----------- \n\n` +
+                                                                    Object.values(
+                                                                        stdouts
+                                                                    ).join(
+                                                                        "\n"
+                                                                    ),
+                                                            stderr: Object.values(
+                                                                stderrs
+                                                            ).join("\n"),
+                                                            status: "completed",
+                                                        },
+                                                    }
+                                                )
+                                                .then()
+                                                .catch((error) => {
+                                                    logger.error(
+                                                        `Error updating command log: ${
+                                                            (error as Error)
+                                                                .message
+                                                        }`
+                                                    );
+                                                });
                                         }
-                                    );
-                                }
-                            })
-                            .catch((error) => {
-                                Mongodb.getCommandLogsCollection().updateOne(
-                                    {
-                                        uuid: currentUUID,
-                                    },
-                                    {
-                                        $set: {
-                                            stdout: "",
-                                            stderr: (error as Error).message,
-                                            status: "failed",
-                                        },
                                     }
-                                );
-                            });
+                                )
+                                .catch((error) => {
+                                    Mongodb.getCommandLogsCollection()
+                                        .updateOne(
+                                            {
+                                                uuid: currentUUID,
+                                            },
+                                            {
+                                                $set: {
+                                                    stdout: "",
+                                                    stderr: (error as Error)
+                                                        .message,
+                                                    status: "failed",
+                                                },
+                                            }
+                                        )
+                                        .then()
+                                        .catch((err) => {
+                                            logger.error(
+                                                `Error updating command log: ${
+                                                    (err as Error).message
+                                                }`
+                                            );
+                                        });
+                                });
+                        }
                     }
-                }
-            } else if (command == "restart") {
-                for (let service of services) {
-                    for (let serverObject of serverDocs) {
-                        SSHService.restartNode(
-                            serverObject.server,
-                            serverObject.username,
-                            serverObject.password,
-                            service
-                        );
+                } else if (command == "restart") {
+                    for (let service of services) {
+                        for (let serverObject of serverDocs) {
+                            SSHService.restartNode(
+                                serverObject.server,
+                                serverObject.username,
+                                serverObject.password,
+                                service
+                            );
+                        }
                     }
+                } else {
+                    res.status(400).json({ error: "Invalid command" });
+                    return;
                 }
-            } else {
-                res.status(400).json({ error: "Invalid command" });
-                return;
-            }
 
-            res.json({ message: "Command sent successfully" });
+                res.json({ message: "Command sent successfully" });
+            } catch (error) {
+                res.status(500).json({
+                    error: "Internal server error: " + (error as Error).message,
+                });
+            }
         });
 
         app.get("/github-tags", (req, res) => {
@@ -284,15 +320,23 @@ namespace HttpServer {
             }
 
             // Get server details from DB
-            let serverDocs = await Mongodb.getServersCollection()
-                .find({ server: { $in: servers } })
-                .toArray();
-            if (
-                serverDocs.length === 0 ||
-                serverDocs.length !== servers.length
-            ) {
-                res.status(404).json({
-                    error: "No matching servers found in the database",
+            let serverDocs: MongoDbTypes.Server[] = [];
+            try {
+                serverDocs = await Mongodb.getServersCollection()
+                    .find({ server: { $in: servers } })
+                    .toArray();
+                if (
+                    serverDocs.length === 0 ||
+                    serverDocs.length !== servers.length
+                ) {
+                    res.status(404).json({
+                        error: "No matching servers found in the database",
+                    });
+                    return;
+                }
+            } catch (error) {
+                res.status(500).json({
+                    error: "Failed to fetch servers from database " + error,
                 });
                 return;
             }
@@ -313,31 +357,74 @@ namespace HttpServer {
                     )
                         .then((result) => {
                             if (result.isSuccess) {
-                                Mongodb.getServersCollection().updateOne(
-                                    { server: server.server },
-                                    {
-                                        $set: {
-                                            deployStatus: {
-                                                ...server.deployStatus,
-                                                [service]: "active",
-                                            },
-                                            deployLogs: {
-                                                ...server.deployLogs,
-                                                [service]: {
-                                                    stdout: Object.values(
-                                                        result.stdouts
-                                                    ).join("\n"),
-                                                    stderr: Object.values(
-                                                        result.stderrs
-                                                    ).join("\n"),
+                                Mongodb.getServersCollection()
+                                    .updateOne(
+                                        { server: server.server },
+                                        {
+                                            $set: {
+                                                deployStatus: {
+                                                    ...server.deployStatus,
+                                                    [service]: "active",
+                                                },
+                                                deployLogs: {
+                                                    ...server.deployLogs,
+                                                    [service]: {
+                                                        stdout: Object.values(
+                                                            result.stdouts
+                                                        ).join("\n"),
+                                                        stderr: Object.values(
+                                                            result.stderrs
+                                                        ).join("\n"),
+                                                    },
                                                 },
                                             },
-                                        },
-                                    }
-                                );
+                                        }
+                                    )
+                                    .then()
+                                    .catch((error) => {});
                             } else {
                                 logger.error(`Deployment to ${server} failed.`);
-                                Mongodb.getServersCollection().updateOne(
+                                Mongodb.getServersCollection()
+                                    .updateOne(
+                                        { server: server.server },
+                                        {
+                                            $set: {
+                                                deployStatus: {
+                                                    ...server.deployStatus,
+                                                    [service]: "error",
+                                                },
+                                                deployLogs: {
+                                                    ...server.deployLogs,
+                                                    [service]: {
+                                                        stdout: Object.values(
+                                                            result.stdouts
+                                                        ).join("\n"),
+                                                        stderr: Object.values(
+                                                            result.stderrs
+                                                        ).join("\n"),
+                                                    },
+                                                },
+                                            },
+                                        }
+                                    )
+                                    .then()
+                                    .catch((error) => {
+                                        logger.error(
+                                            `Error updating deploy logs for ${
+                                                server.server
+                                            }: ${(error as Error).message}`
+                                        );
+                                    });
+                            }
+                        })
+                        .catch((error) => {
+                            logger.error(
+                                `Deployment to ${server} failed: ${
+                                    (error as Error).message
+                                }`
+                            );
+                            Mongodb.getServersCollection()
+                                .updateOne(
                                     { server: server.server },
                                     {
                                         $set: {
@@ -348,44 +435,22 @@ namespace HttpServer {
                                             deployLogs: {
                                                 ...server.deployLogs,
                                                 [service]: {
-                                                    stdout: Object.values(
-                                                        result.stdouts
-                                                    ).join("\n"),
-                                                    stderr: Object.values(
-                                                        result.stderrs
-                                                    ).join("\n"),
+                                                    stdout: "",
+                                                    stderr: (error as Error)
+                                                        .message,
                                                 },
                                             },
                                         },
                                     }
-                                );
-                            }
-                        })
-                        .catch((error) => {
-                            logger.error(
-                                `Deployment to ${server} failed: ${
-                                    (error as Error).message
-                                }`
-                            );
-                            Mongodb.getServersCollection().updateOne(
-                                { server: server.server },
-                                {
-                                    $set: {
-                                        deployStatus: {
-                                            ...server.deployStatus,
-                                            [service]: "error",
-                                        },
-                                        deployLogs: {
-                                            ...server.deployLogs,
-                                            [service]: {
-                                                stdout: "",
-                                                stderr: (error as Error)
-                                                    .message,
-                                            },
-                                        },
-                                    },
-                                }
-                            );
+                                )
+                                .then()
+                                .catch((err) => {
+                                    logger.error(
+                                        `Error updating deploy logs for ${
+                                            server.server
+                                        }: ${(err as Error).message}`
+                                    );
+                                });
                         });
                 }
             } catch (error) {
@@ -505,58 +570,67 @@ namespace HttpServer {
                         )
                             .then((result) => {
                                 if (result.isSuccess) {
-                                    Mongodb.getServersCollection().updateOne(
-                                        { server: serverData.server },
-                                        {
-                                            $set: {
-                                                cpu: result.cpu,
-                                                os: result.os,
-                                                ram: result.ram,
-                                                status: "active",
-                                                setupLogs: {
-                                                    stdout: Object.values(
-                                                        result.stdouts
-                                                    ).join("\n"),
-                                                    stderr: Object.values(
-                                                        result.stderrs
-                                                    ).join("\n"),
+                                    Mongodb.getServersCollection()
+                                        .updateOne(
+                                            { server: serverData.server },
+                                            {
+                                                $set: {
+                                                    cpu: result.cpu,
+                                                    os: result.os,
+                                                    ram: result.ram,
+                                                    status: "active",
+                                                    setupLogs: {
+                                                        stdout: Object.values(
+                                                            result.stdouts
+                                                        ).join("\n"),
+                                                        stderr: Object.values(
+                                                            result.stderrs
+                                                        ).join("\n"),
+                                                    },
                                                 },
-                                            },
-                                        }
-                                    );
+                                            }
+                                        )
+                                        .then()
+                                        .catch((error) => {});
                                 } else {
-                                    Mongodb.getServersCollection().updateOne(
+                                    Mongodb.getServersCollection()
+                                        .updateOne(
+                                            { server: serverData.server },
+                                            {
+                                                $set: {
+                                                    status: "error",
+                                                    setupLogs: {
+                                                        stdout: Object.values(
+                                                            result.stdouts
+                                                        ).join("\n"),
+                                                        stderr: Object.values(
+                                                            result.stderrs
+                                                        ).join("\n"),
+                                                    },
+                                                },
+                                            }
+                                        )
+                                        .then()
+                                        .catch((error) => {});
+                                }
+                            })
+                            .catch((error) => {
+                                Mongodb.getServersCollection()
+                                    .updateOne(
                                         { server: serverData.server },
                                         {
                                             $set: {
                                                 status: "error",
                                                 setupLogs: {
-                                                    stdout: Object.values(
-                                                        result.stdouts
-                                                    ).join("\n"),
-                                                    stderr: Object.values(
-                                                        result.stderrs
-                                                    ).join("\n"),
+                                                    stdout: "",
+                                                    stderr: (error as Error)
+                                                        .message,
                                                 },
                                             },
                                         }
-                                    );
-                                }
-                            })
-                            .catch((error) => {
-                                Mongodb.getServersCollection().updateOne(
-                                    { server: serverData.server },
-                                    {
-                                        $set: {
-                                            status: "error",
-                                            setupLogs: {
-                                                stdout: "",
-                                                stderr: (error as Error)
-                                                    .message,
-                                            },
-                                        },
-                                    }
-                                );
+                                    )
+                                    .then()
+                                    .catch((error) => {});
                             });
                     }
                 } catch (error) {
@@ -856,9 +930,10 @@ namespace HttpServer {
                             .then(async (result) => {
                                 if (result.isSuccess) {
                                     let currentLogDbObj =
-                                        await Mongodb.getCommandLogsCollection().findOne(
-                                            { uuid: currentUUID }
-                                        );
+                                        await Mongodb.getCommandLogsCollection()
+                                            .findOne({ uuid: currentUUID })
+                                            .then()
+                                            .catch((error) => {});
                                     Mongodb.getCommandLogsCollection().updateOne(
                                         {
                                             uuid: currentUUID,
@@ -881,35 +956,42 @@ namespace HttpServer {
                                         }
                                     );
                                 } else {
-                                    Mongodb.getCommandLogsCollection().updateOne(
+                                    Mongodb.getCommandLogsCollection()
+                                        .updateOne(
+                                            {
+                                                uuid: currentUUID,
+                                            },
+                                            {
+                                                $set: {
+                                                    stdout: "",
+                                                    stderr: Object.values(
+                                                        result.stderrs
+                                                    ).join("\n"),
+                                                    status: "failed",
+                                                },
+                                            }
+                                        )
+                                        .then()
+                                        .catch((error) => {});
+                                }
+                            })
+                            .catch((error) => {
+                                Mongodb.getCommandLogsCollection()
+                                    .updateOne(
                                         {
                                             uuid: currentUUID,
                                         },
                                         {
                                             $set: {
                                                 stdout: "",
-                                                stderr: Object.values(
-                                                    result.stderrs
-                                                ).join("\n"),
+                                                stderr: (error as Error)
+                                                    .message,
                                                 status: "failed",
                                             },
                                         }
-                                    );
-                                }
-                            })
-                            .catch((error) => {
-                                Mongodb.getCommandLogsCollection().updateOne(
-                                    {
-                                        uuid: currentUUID,
-                                    },
-                                    {
-                                        $set: {
-                                            stdout: "",
-                                            stderr: (error as Error).message,
-                                            status: "failed",
-                                        },
-                                    }
-                                );
+                                    )
+                                    .then()
+                                    .catch((error) => {});
                             });
                     }
 

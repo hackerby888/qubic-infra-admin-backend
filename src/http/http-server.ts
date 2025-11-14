@@ -143,7 +143,7 @@ namespace HttpServer {
                 let currentUUID = uuidv4();
                 await Mongodb.getCommandLogsCollection().insertOne({
                     operator: operator,
-                    command: "shutdown " + services.join(", "),
+                    command: `${command} ` + services.join(", "),
                     stdout: "",
                     stderr: "",
                     timestamp: Date.now(),
@@ -151,6 +151,32 @@ namespace HttpServer {
                     uuid: currentUUID,
                     isStandardCommand: true,
                 });
+
+                const updateCommandLogToDb = ({
+                    stdout,
+                    stderr,
+                    status,
+                }: {
+                    stdout: string;
+                    stderr: string;
+                    status: "completed" | "failed";
+                }) => {
+                    Mongodb.getCommandLogsCollection()
+                        .updateOne(
+                            {
+                                uuid: currentUUID,
+                            },
+                            {
+                                $set: {
+                                    stdout: stdout,
+                                    stderr: stderr,
+                                    status: status,
+                                },
+                            }
+                        )
+                        .then()
+                        .catch((error) => {});
+                };
 
                 if (command == "shutdown") {
                     for (let service of services) {
@@ -171,65 +197,29 @@ namespace HttpServer {
                                                     })
                                                     .then()
                                                     .catch(() => null);
-                                            Mongodb.getCommandLogsCollection()
-                                                .updateOne(
-                                                    {
-                                                        uuid: currentUUID,
-                                                    },
-                                                    {
-                                                        $set: {
-                                                            stdout:
-                                                                currentLogDbObj?.stdout ||
-                                                                "" +
-                                                                    "\n" +
-                                                                    `---------- Shutdown successful for ${service} on ${serverObject.server} ----------- \n\n` +
-                                                                    Object.values(
-                                                                        stdouts
-                                                                    ).join(
-                                                                        "\n"
-                                                                    ),
-                                                            stderr: Object.values(
-                                                                stderrs
-                                                            ).join("\n"),
-                                                            status: "completed",
-                                                        },
-                                                    }
-                                                )
-                                                .then()
-                                                .catch((error) => {
-                                                    logger.error(
-                                                        `Error updating command log: ${
-                                                            (error as Error)
-                                                                .message
-                                                        }`
-                                                    );
-                                                });
+                                            updateCommandLogToDb({
+                                                stdout:
+                                                    currentLogDbObj?.stdout ||
+                                                    "" +
+                                                        "\n" +
+                                                        `---------- Shutdown successful for ${service} on ${serverObject.server} ----------- \n\n` +
+                                                        Object.values(
+                                                            stdouts
+                                                        ).join("\n"),
+                                                stderr: Object.values(
+                                                    stderrs
+                                                ).join("\n"),
+                                                status: "completed",
+                                            });
                                         }
                                     }
                                 )
                                 .catch((error) => {
-                                    Mongodb.getCommandLogsCollection()
-                                        .updateOne(
-                                            {
-                                                uuid: currentUUID,
-                                            },
-                                            {
-                                                $set: {
-                                                    stdout: "",
-                                                    stderr: (error as Error)
-                                                        .message,
-                                                    status: "failed",
-                                                },
-                                            }
-                                        )
-                                        .then()
-                                        .catch((err) => {
-                                            logger.error(
-                                                `Error updating command log: ${
-                                                    (err as Error).message
-                                                }`
-                                            );
-                                        });
+                                    updateCommandLogToDb({
+                                        stdout: "",
+                                        stderr: (error as Error).message,
+                                        status: "failed",
+                                    });
                                 });
                         }
                     }
@@ -241,7 +231,49 @@ namespace HttpServer {
                                 serverObject.username,
                                 serverObject.password,
                                 service
-                            );
+                            )
+                                .then(
+                                    async ({ stdouts, stderrs, isSuccess }) => {
+                                        if (isSuccess) {
+                                            let currentLogDbObj =
+                                                await Mongodb.getCommandLogsCollection()
+                                                    .findOne({
+                                                        uuid: currentUUID,
+                                                    })
+                                                    .then()
+                                                    .catch(() => null);
+                                            updateCommandLogToDb({
+                                                stdout:
+                                                    currentLogDbObj?.stdout ||
+                                                    "" +
+                                                        "\n" +
+                                                        `---------- Restart successful for ${service} on ${serverObject.server} ----------- \n\n` +
+                                                        Object.values(
+                                                            stdouts
+                                                        ).join("\n"),
+                                                stderr: Object.values(
+                                                    stderrs
+                                                ).join("\n"),
+                                                status: "completed",
+                                            });
+                                        } else {
+                                            updateCommandLogToDb({
+                                                stdout: "",
+                                                stderr: Object.values(
+                                                    stderrs
+                                                ).join("\n"),
+                                                status: "failed",
+                                            });
+                                        }
+                                    }
+                                )
+                                .catch((error) => {
+                                    updateCommandLogToDb({
+                                        stdout: "",
+                                        stderr: (error as Error).message,
+                                        status: "failed",
+                                    });
+                                });
                         }
                     }
                 } else {
@@ -1009,9 +1041,11 @@ namespace HttpServer {
             }
         );
 
-        app.listen(port, () => {
+        let server = app.listen(port, () => {
             logger.info(`HTTP Server is running at http://localhost:${port}`);
         });
+
+        return server;
     }
 }
 

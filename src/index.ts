@@ -4,6 +4,7 @@ import { HttpServer } from "./http/http-server.js";
 import { NodeService } from "./services/node-service.js";
 import { Mongodb } from "./database/db.js";
 import { SSHService } from "./services/ssh-service.js";
+import { SocketServer } from "./http/socket-server.js";
 
 function checkEnvVariables() {
     const requiredVars = [
@@ -28,7 +29,8 @@ async function main() {
     await Mongodb.connectDB();
     await GithubService.start();
     await NodeService.start();
-    await HttpServer.start();
+    const server = await HttpServer.start();
+    SocketServer.start(server);
 }
 
 main();

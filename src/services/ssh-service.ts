@@ -8,11 +8,15 @@ import stripAnsi from "strip-ansi";
 import { getBasenameFromUrl, getUnzipCommandFromUrl } from "../utils/common.js";
 
 export namespace SSHService {
-    const LITE_SCREEN_NAME = "qubic";
-    const BOB_SCREEN_NAME = "bob";
+    export const LITE_SCREEN_NAME = "qubic";
+    export const BOB_SCREEN_NAME = "bob";
 
     let _isExecutingCommandsMap: {
         [key: string]: boolean;
+    } = {};
+
+    export let cleanUpSSHMap: {
+        [key: string]: () => void;
     } = {};
 
     const Scripts = {
@@ -338,7 +342,8 @@ export namespace SSHService {
         username: string,
         password: string,
         commands: string[],
-        timeout: number = 0
+        timeout: number = 0,
+        onData?: (data: string) => void
     ) {
         await _accquireExecutionLock(host);
 
@@ -357,12 +362,19 @@ export namespace SSHService {
         try {
             const emitter = new EventEmitter();
             const conn = new Client();
+
             conn.on("ready", () => {
                 conn.shell((err, stream) => {
                     if (err) {
                         emitter.emit("error", err);
                         return;
                     }
+
+                    cleanUpSSHMap[host] = () => {
+                        stream.close();
+                        conn.end();
+                    };
+
                     stream
                         .on("close", () => {
                             emitter.emit("done");
@@ -372,6 +384,9 @@ export namespace SSHService {
                             logger.info(`SSH Output: ${output}`);
                             stdouts["shell"] =
                                 (stdouts["shell"] || "") + output;
+                            if (onData) {
+                                onData(output);
+                            }
                         })
                         .stderr.on("data", (data) => {
                             const errorOutput = stripAnsi(data.toString());
@@ -423,6 +438,7 @@ export namespace SSHService {
         }
 
         await _releaseExecutionLock(host);
+        delete cleanUpSSHMap[host];
         return { stdouts, stderrs, isSuccess };
     }
 

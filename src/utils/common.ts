@@ -65,3 +65,9 @@ export async function checkLink(url: string): Promise<boolean> {
         return false;
     }
 }
+
+export function inlineBashCommands(commands: string[]): string {
+    return commands
+        .filter((cmd: string) => cmd && !cmd.trim().startsWith("#"))
+        .join(" && ");
+}

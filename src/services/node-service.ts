@@ -143,8 +143,8 @@ namespace NodeService {
 
             results.forEach((tickInfo, index) => {
                 let serverObject =
-                    _status.liteServers[servers[index]?.server as string];
-                if (tickInfo.tick !== -1) {
+                    _status.liteServers[servers[index]!.server as string];
+                if (tickInfo.tick !== -1 || !serverObject) {
                     let oldTick = serverObject?.tick || -1;
                     let operator = servers[index]?.operator || "unknown";
                     _status.liteServers[servers[index]?.server as string] = {
@@ -154,7 +154,10 @@ namespace NodeService {
                         epoch: tickInfo.epoch,
                         alignedVotes: tickInfo.alignedVotes,
                         misalignedVotes: tickInfo.misalignedVotes,
-                        lastUpdated: Date.now(),
+                        lastUpdated:
+                            tickInfo.tick !== -1
+                                ? Date.now()
+                                : serverObject?.lastUpdated || -1,
                         lastTickChanged:
                             oldTick !== tickInfo.tick
                                 ? Date.now()
@@ -191,7 +194,10 @@ namespace NodeService {
                             tickInfo.currentVerifyLoggingTick,
                         currentIndexingTick: tickInfo.currentIndexingTick,
                         initialTick: tickInfo.initialTick,
-                        lastUpdated: Date.now(),
+                        lastUpdated:
+                            tickInfo.currentFetchingTick !== -1
+                                ? Date.now()
+                                : serverObject?.lastUpdated || -1,
                         lastTickChanged:
                             oldTick !== tickInfo.currentFetchingTick
                                 ? Date.now()

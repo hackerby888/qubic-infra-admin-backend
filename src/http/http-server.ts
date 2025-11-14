@@ -623,7 +623,15 @@ namespace HttpServer {
                                             }
                                         )
                                         .then()
-                                        .catch((error) => {});
+                                        .catch((_) => {});
+
+                                    Mongodb.getLiteNodeCollection()
+                                        .insertOne({
+                                            server: serverData.server,
+                                            operator: operator as string,
+                                            isPrivate: false,
+                                        })
+                                        .catch((_) => {});
                                 } else {
                                     Mongodb.getServersCollection()
                                         .updateOne(
@@ -813,14 +821,28 @@ namespace HttpServer {
             async (req, res) => {
                 try {
                     let operator = req.user?.username;
+                    let isStandardCommandFilter = req.query
+                        .isStandardCommand as string;
+                    let offset = parseInt(req.query.offset as string) || 0;
+                    let limit = parseInt(req.query.limit as string) || Infinity;
+                    let filterObj: any = {};
+
+                    if (isStandardCommandFilter === "true") {
+                        filterObj.isStandardCommand = true;
+                    } else if (isStandardCommandFilter === "false") {
+                        filterObj.isStandardCommand = false;
+                    }
+
                     if (!operator) {
                         res.status(400).json({ error: "No operator found" });
                         return;
                     }
 
                     let commandLogs = await Mongodb.getCommandLogsCollection()
-                        .find({ operator: operator })
+                        .find({ operator: operator, ...filterObj })
                         .sort({ timestamp: -1 })
+                        .skip(offset)
+                        .limit(limit)
                         .project({
                             _id: 0,
                         })

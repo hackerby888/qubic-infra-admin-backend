@@ -13,11 +13,13 @@ export namespace MongoDbTypes {
     export interface LiteNode {
         server: string;
         operator?: string;
+        isPrivate: boolean;
     }
 
     export interface BobNode {
         server: string;
         operator?: string;
+        isPrivate: boolean;
     }
 
     export interface CommandLog {

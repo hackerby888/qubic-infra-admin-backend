@@ -62,11 +62,13 @@ export namespace SocketServer {
                             serverDoc.password,
                             [`screen -r ${screenNameMap[data.service]} -d`],
                             0,
-                            (logData: string) => {
-                                socket.emit("serviceLogUpdate", {
-                                    service: data.service,
-                                    log: logData,
-                                });
+                            {
+                                onData: (logData: string) => {
+                                    socket.emit("serviceLogUpdate", {
+                                        service: data.service,
+                                        log: logData,
+                                    });
+                                },
                             }
                         );
                         logger.info(

@@ -5,7 +5,11 @@ import fs from "fs";
 import { logger } from "../utils/logger.js";
 import { Mongodb, MongoDbTypes } from "../database/db.js";
 import stripAnsi from "strip-ansi";
-import { getBasenameFromUrl, getUnzipCommandFromUrl } from "../utils/common.js";
+import {
+    getBasenameFromUrl,
+    getUnzipCommandFromUrl,
+    inlineBashCommands,
+} from "../utils/common.js";
 
 export namespace SSHService {
     export const LITE_SCREEN_NAME = "qubic";
@@ -161,12 +165,27 @@ export namespace SSHService {
                 ram: "",
             };
         }
-        let result = await executeCommands(host, username, password, commands);
+        // NOTE: Using isNonInteractive to avoid issues with apt freeze the stdin
+        let result = await executeCommands(
+            host,
+            username,
+            password,
+            commands,
+            0,
+            {
+                isNonInteractive: true,
+            }
+        );
+        // To be able to map the outputs correctly, execute system info commands separately aka (isNonInteractive: true)
         let sysInfo = await executeCommands(
             host,
             username,
             password,
-            Object.values(systemInfoCommands)
+            Object.values(systemInfoCommands),
+            0,
+            {
+                isNonInteractive: true,
+            }
         );
 
         return {
@@ -343,7 +362,10 @@ export namespace SSHService {
         password: string,
         commands: string[],
         timeout: number = 0,
-        onData?: (data: string) => void
+        extraData: {
+            onData?: (data: string) => void;
+            isNonInteractive?: boolean;
+        } = {}
     ) {
         await _accquireExecutionLock(host);
 
@@ -363,44 +385,111 @@ export namespace SSHService {
             const emitter = new EventEmitter();
             const conn = new Client();
 
-            conn.on("ready", () => {
-                conn.shell((err, stream) => {
-                    if (err) {
-                        emitter.emit("error", err);
+            cleanUpSSHMap[host] = () => {
+                conn.end();
+            };
+
+            const handleOnData = (data: any, command?: string) => {
+                const output = stripAnsi(data.toString());
+                logger.info(`SSH Output: ${output}`);
+                if (command) {
+                    stdouts[command] = (stdouts[command] || "") + output;
+                } else {
+                    stdouts["shell"] = (stdouts["shell"] || "") + output;
+                }
+
+                if (extraData.onData) {
+                    extraData.onData(output);
+                }
+            };
+
+            const handleOnErrorData = (data: any, command?: string) => {
+                let criticalErors = [": syntax error:"];
+                const errorOutput = stripAnsi(data.toString());
+                logger.error(`SSH Error Output: ${errorOutput}`);
+                if (command) {
+                    stderrs[command] = (stderrs[command] || "") + errorOutput;
+                } else {
+                    stderrs["shell"] = (stderrs["shell"] || "") + errorOutput;
+                }
+                for (let critical of criticalErors) {
+                    if (errorOutput.includes(critical)) {
+                        emitter.emit(
+                            "error",
+                            new Error(`Critical SSH Error: ${errorOutput}`)
+                        );
                         return;
                     }
+                }
+            };
 
-                    cleanUpSSHMap[host] = () => {
-                        stream.close();
-                        conn.end();
-                    };
-
-                    stream
-                        .on("close", () => {
-                            emitter.emit("done");
-                        })
-                        .on("data", (data: any) => {
-                            const output = stripAnsi(data.toString());
-                            logger.info(`SSH Output: ${output}`);
-                            stdouts["shell"] =
-                                (stdouts["shell"] || "") + output;
-                            if (onData) {
-                                onData(output);
+            conn.on("ready", async () => {
+                if (!extraData.isNonInteractive) {
+                    conn.shell(
+                        {
+                            width: 640 * 3,
+                            cols: 80 * 3,
+                        },
+                        (err, stream) => {
+                            if (err) {
+                                emitter.emit("error", err);
+                                return;
                             }
-                        })
-                        .stderr.on("data", (data) => {
-                            const errorOutput = stripAnsi(data.toString());
-                            logger.error(`SSH Error Output: ${errorOutput}`);
-                            stderrs["shell"] =
-                                (stderrs["shell"] || "") + errorOutput;
-                        });
 
-                    // Write commands to the shell
+                            stream
+                                .on("close", () => {
+                                    emitter.emit("done");
+                                })
+                                .on("data", (data: any) => {
+                                    handleOnData(data);
+                                })
+                                .stderr.on("data", (data) => {
+                                    handleOnErrorData(data);
+                                });
+
+                            // Write commands to the shell
+                            for (const command of commands) {
+                                stream.write(command + "\n");
+                            }
+                            stream.end("exit\n");
+                        }
+                    );
+                } else {
+                    let totalExecuted = 0;
                     for (const command of commands) {
-                        stream.write(command + "\n");
+                        try {
+                            new Promise<void>((resolve, reject) => {
+                                conn.exec(command, (err, stream) => {
+                                    if (err) {
+                                        reject(err);
+                                        return;
+                                    }
+
+                                    stream
+                                        .on("close", () => {
+                                            totalExecuted += 1;
+                                            if (
+                                                totalExecuted ===
+                                                commands.length
+                                            ) {
+                                                emitter.emit("done");
+                                            }
+                                            resolve();
+                                        })
+                                        .on("data", (data: any) => {
+                                            handleOnData(data, command);
+                                        })
+                                        .stderr.on("data", (data) => {
+                                            handleOnErrorData(data, command);
+                                        });
+                                });
+                            });
+                        } catch (error) {
+                            emitter.emit("error", error);
+                            break;
+                        }
                     }
-                    stream.end("exit\n");
-                });
+                }
             }).on("error", (err) => {
                 emitter.emit("error", err);
             });
@@ -411,26 +500,47 @@ export namespace SSHService {
                 password: password,
             });
 
+            let isFinallyDone = false;
+
             // Timeout handling
             if (timeout > 0) {
                 setTimeout(() => {
+                    if (isFinallyDone) return;
                     emitter.emit("error", new Error("SSH command timeout"));
                 }, timeout);
             }
 
             await new Promise<void>((resolve, reject) => {
                 emitter.on("done", () => {
-                    conn.end();
+                    if (isFinallyDone) return;
+
+                    if (cleanUpSSHMap[host]) {
+                        cleanUpSSHMap[host]();
+                    }
                     isSuccess = true;
+                    isFinallyDone = true;
                     resolve();
+                    logger.info(
+                        `SSH command execution for ${host}@${username} done.`
+                    );
                 });
 
                 emitter.on("error", (error) => {
-                    conn.end();
+                    if (isFinallyDone) return;
+
+                    if (cleanUpSSHMap[host]) {
+                        cleanUpSSHMap[host]();
+                    }
                     isSuccess = false;
+                    isFinallyDone = true;
                     resolve();
+                    logger.error(
+                        `SSH command execution for ${host}@${username} error: ${error}`
+                    );
                 });
             });
+
+            emitter.removeAllListeners();
         } catch (error) {
             logger.error(
                 `SSH command execution for ${host}@${username} error: ${error}`

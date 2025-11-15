@@ -143,6 +143,7 @@ namespace HttpServer {
                 let currentUUID = uuidv4();
                 await Mongodb.getCommandLogsCollection().insertOne({
                     operator: operator,
+                    servers: servers,
                     command: `${command} ` + services.join(", "),
                     stdout: "",
                     stderr: "",
@@ -159,7 +160,7 @@ namespace HttpServer {
                 }: {
                     stdout: string;
                     stderr: string;
-                    status: "completed" | "failed";
+                    status: "pending" | "completed" | "failed";
                 }) => {
                     Mongodb.getCommandLogsCollection()
                         .updateOne(
@@ -178,6 +179,12 @@ namespace HttpServer {
                         .catch((error) => {});
                 };
 
+                let currentStdout = "";
+                let currentStderr = "";
+                let totalCommandsExecuted = 0;
+                const totalCommandsToExecute =
+                    services.length * serverDocs.length;
+
                 if (command == "shutdown") {
                     for (let service of services) {
                         for (let serverObject of serverDocs) {
@@ -189,27 +196,32 @@ namespace HttpServer {
                             )
                                 .then(
                                     async ({ stdouts, stderrs, isSuccess }) => {
+                                        totalCommandsExecuted++;
                                         if (isSuccess) {
-                                            let currentLogDbObj =
-                                                await Mongodb.getCommandLogsCollection()
-                                                    .findOne({
-                                                        uuid: currentUUID,
-                                                    })
-                                                    .then()
-                                                    .catch(() => null);
+                                            let isOk =
+                                                Object.values(stdouts)
+                                                    .join("\n")
+                                                    .trim() === "";
+                                            currentStdout +=
+                                                "\n" +
+                                                `---------- Shutdown log for ${service} on ${serverObject.server} ----------- \n\n`;
+                                            currentStdout += isOk
+                                                ? "OK"
+                                                : Object.values(stdouts).join(
+                                                      "\n"
+                                                  );
+                                            currentStderr +=
+                                                Object.values(stderrs).join(
+                                                    "\n"
+                                                );
                                             updateCommandLogToDb({
-                                                stdout:
-                                                    currentLogDbObj?.stdout ||
-                                                    "" +
-                                                        "\n" +
-                                                        `---------- Shutdown successful for ${service} on ${serverObject.server} ----------- \n\n` +
-                                                        Object.values(
-                                                            stdouts
-                                                        ).join("\n"),
-                                                stderr: Object.values(
-                                                    stderrs
-                                                ).join("\n"),
-                                                status: "completed",
+                                                stdout: currentStdout,
+                                                stderr: currentStderr,
+                                                status:
+                                                    totalCommandsExecuted ===
+                                                    totalCommandsToExecute
+                                                        ? "completed"
+                                                        : "pending",
                                             });
                                         }
                                     }
@@ -234,27 +246,32 @@ namespace HttpServer {
                             )
                                 .then(
                                     async ({ stdouts, stderrs, isSuccess }) => {
+                                        totalCommandsExecuted++;
                                         if (isSuccess) {
-                                            let currentLogDbObj =
-                                                await Mongodb.getCommandLogsCollection()
-                                                    .findOne({
-                                                        uuid: currentUUID,
-                                                    })
-                                                    .then()
-                                                    .catch(() => null);
+                                            let isOk =
+                                                Object.values(stdouts)
+                                                    .join("\n")
+                                                    .trim() !== "";
+                                            currentStdout +=
+                                                "\n" +
+                                                `---------- Restart log for ${service} on ${serverObject.server} ----------- \n\n`;
+                                            currentStdout += isOk
+                                                ? "OK"
+                                                : Object.values(stdouts).join(
+                                                      "\n"
+                                                  );
+                                            currentStderr +=
+                                                Object.values(stderrs).join(
+                                                    "\n"
+                                                );
                                             updateCommandLogToDb({
-                                                stdout:
-                                                    currentLogDbObj?.stdout ||
-                                                    "" +
-                                                        "\n" +
-                                                        `---------- Restart successful for ${service} on ${serverObject.server} ----------- \n\n` +
-                                                        Object.values(
-                                                            stdouts
-                                                        ).join("\n"),
-                                                stderr: Object.values(
-                                                    stderrs
-                                                ).join("\n"),
-                                                status: "completed",
+                                                stdout: currentStdout,
+                                                stderr: currentStderr,
+                                                status:
+                                                    totalCommandsExecuted ===
+                                                    totalCommandsToExecute
+                                                        ? "completed"
+                                                        : "pending",
                                             });
                                         } else {
                                             updateCommandLogToDb({
@@ -290,7 +307,14 @@ namespace HttpServer {
         });
 
         app.get("/github-tags", (req, res) => {
-            let tags = GithubService.getGithubTags();
+            let service = req.query.service as MongoDbTypes.ServiceType;
+            if (!service) {
+                res.json({
+                    error: "Invalid service",
+                });
+                return;
+            }
+            let tags = GithubService.getGithubTags(service);
             res.json(tags);
         });
 
@@ -308,10 +332,18 @@ namespace HttpServer {
                 bobNode: "bob",
             };
 
-            let binaryUrl: string = GithubService.getDownloadUrlForTag(
-                tag,
-                binaryFileMap[service as keyof typeof binaryFileMap]
-            );
+            let binaryUrl: string = "";
+            try {
+                binaryUrl = GithubService.getDownloadUrlForTag(
+                    tag,
+                    binaryFileMap[service as keyof typeof binaryFileMap],
+                    service
+                );
+            } catch (error) {
+                res.status(400).json({
+                    error: (error as Error).message,
+                });
+            }
             // Validate input
             if (!servers || !Array.isArray(servers) || servers.length === 0) {
                 res.status(400).json({
@@ -334,10 +366,13 @@ namespace HttpServer {
                 });
                 return;
             }
-            if (service === MongoDbTypes.ServiceType.LiteNode) {
+            if (
+                service === MongoDbTypes.ServiceType.LiteNode ||
+                service === MongoDbTypes.ServiceType.BobNode
+            ) {
                 if (!extraData.epochFile || !extraData.peers) {
                     res.status(400).json({
-                        error: "Missing 'epochFile' or 'peers' in extraData for Lite Node deployment",
+                        error: "Missing 'epochFile' or 'peers' in extraData for deployment",
                     });
                     return;
                 }
@@ -376,6 +411,7 @@ namespace HttpServer {
             // Deploy to each server
             try {
                 for (let server of serverDocs) {
+                    if (!server.services.includes(service)) continue;
                     SSHService.deployNode(
                         server.server,
                         server!.username,
@@ -600,7 +636,7 @@ namespace HttpServer {
                             serverData.username,
                             serverData.password
                         )
-                            .then((result) => {
+                            .then(async (result) => {
                                 if (result.isSuccess) {
                                     Mongodb.getServersCollection()
                                         .updateOne(
@@ -625,13 +661,23 @@ namespace HttpServer {
                                         .then()
                                         .catch((_) => {});
 
-                                    Mongodb.getLiteNodeCollection()
-                                        .insertOne({
-                                            server: serverData.server,
-                                            operator: operator as string,
-                                            isPrivate: false,
-                                        })
-                                        .catch((_) => {});
+                                    try {
+                                        await Mongodb.getLiteNodeCollection()
+                                            .insertOne({
+                                                server: serverData.server,
+                                                operator: operator as string,
+                                                isPrivate: false,
+                                            })
+                                            .catch((_) => {});
+                                        await Mongodb.getBobNodeCollection()
+                                            .insertOne({
+                                                server: serverData.server,
+                                                operator: operator as string,
+                                                isPrivate: false,
+                                            })
+                                            .catch((_) => {});
+                                        await NodeService.pullServerLists();
+                                    } catch (error) {}
                                 } else {
                                     Mongodb.getServersCollection()
                                         .updateOne(
@@ -651,7 +697,7 @@ namespace HttpServer {
                                             }
                                         )
                                         .then()
-                                        .catch((error) => {});
+                                        .catch((_) => {});
                                 }
                             })
                             .catch((error) => {
@@ -788,6 +834,17 @@ namespace HttpServer {
                         server: server,
                         operator: operator,
                     });
+
+                    // Remove all lite/bob nodes associcate with it
+                    await Mongodb.getLiteNodeCollection().deleteOne({
+                        server: server,
+                        operator: operator,
+                    });
+                    await Mongodb.getBobNodeCollection().deleteOne({
+                        server: server,
+                        operator: operator,
+                    });
+                    await NodeService.pullServerLists();
                     res.json({ message: "Server deleted successfully" });
                 } catch (error) {
                     logger.error(
@@ -802,8 +859,13 @@ namespace HttpServer {
 
         app.post("/refresh-github-tags", async (req, res) => {
             try {
-                await GithubService.pullTagsFromGithub();
-                let tags = GithubService.getGithubTags();
+                let service = req.body.service as MongoDbTypes.ServiceType;
+                if (!service) {
+                    res.status(400).json({ error: "No service specified" });
+                    return;
+                }
+                await GithubService.pullTagsFromGithub(service);
+                let tags = GithubService.getGithubTags(service);
                 res.json(tags);
             } catch (error) {
                 logger.error(

@@ -135,6 +135,17 @@ namespace NodeService {
     async function watchLiteNodes() {
         while (true) {
             let servers: MongoDbTypes.LiteNode[] = [..._currentLiteNodes];
+            // Check removed node and delete them from status object
+            if (
+                _status.liteServers &&
+                Object.keys(_status.liteServers).length > 0
+            ) {
+                Object.keys(_status.liteServers).forEach((server) => {
+                    if (!servers.some((s) => s.server === server)) {
+                        delete _status.liteServers[server];
+                    }
+                });
+            }
 
             let allPromises = servers.map((server) =>
                 getLiteNodeTickInfo(server.server)
@@ -173,7 +184,19 @@ namespace NodeService {
     async function watchBobNodes() {
         while (true) {
             let servers: MongoDbTypes.BobNode[] = [..._currentBobNodes];
+            // Check removed node and delete them from status object
+            if (
+                _status.bobServers &&
+                Object.keys(_status.bobServers).length > 0
+            ) {
+                Object.keys(_status.bobServers).forEach((server) => {
+                    if (!servers.some((s) => s.server === server)) {
+                        delete _status.bobServers[server];
+                    }
+                });
+            }
 
+            // Fetch tick info for each server
             let allPromises = servers.map((server) =>
                 getBobNodeTickInfo(server.server)
             );
@@ -251,7 +274,7 @@ namespace NodeService {
         }
     }
 
-    async function pullServerLists() {
+    export async function pullServerLists() {
         try {
             let liteServers = await Mongodb.getLiteNodes();
             let bobServers = await Mongodb.getBobNodes();

@@ -14,6 +14,25 @@ import {
 export namespace SSHService {
     export const LITE_SCREEN_NAME = "qubic";
     export const BOB_SCREEN_NAME = "bob";
+    export const DEFAULT_BOB_CONFIG = {
+        // Format: bob:ip:port
+        "p2p-node": [],
+        // Format: BM:ip:port:0-0-0-0 where 0-0-0-0 is the passcode
+        "trusted-node": [],
+        "request-cycle-ms": 500,
+        "request-logging-cycle-ms": 150,
+        "future-offset": 3,
+        "log-level": "info",
+        "keydb-url": "tcp://127.0.0.1:6379",
+        "run-server": true,
+        "server-port": 21842,
+        "arbitrator-identity":
+            "AFZPUAIYVPNUYGJRQVLUKOPPVLHAZQTGLYAAUUNBXFTVTAMSBKQBLEIEPCVJ",
+        "trusted-entities": [
+            "QCTBOBEPDEZGBBCSOWGBYCAIZESDMEVRGLWVNBZAPBIZYEJFFZSPPIVGSCVL",
+        ],
+        "node-seed": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    };
 
     let _isExecutingCommandsMap: {
         [key: string]: boolean;
@@ -48,7 +67,7 @@ export namespace SSHService {
                     `cd qlite`,
                     `CURRENT_PEERS=$(cat peers.txt)`,
                     `CURRENT_BINARY=$(cat binary_name.txt)`,
-                    `screen -dmS qubic bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS"`,
+                    `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS"`,
                 ];
             }
 
@@ -67,15 +86,58 @@ export namespace SSHService {
                 `echo "${binaryName}" > binary_name.txt`,
                 `CURRENT_PEERS=$(cat peers.txt)`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
-                `screen -dmS qubic bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS"`,
+                `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS"`,
             ];
         },
 
-        getBobNodeSetupScripts({ binaryUrl }: { binaryUrl: string }) {
+        getBobNodeSetupScripts({
+            binaryUrl,
+            epochFile,
+            peers,
+            isRestart = false,
+        }: {
+            binaryUrl: string;
+            epochFile: string;
+            peers: string[];
+            isRestart?: boolean;
+        }) {
+            // If isRestart is true, skip setup steps and just start the node with existing configs
+            let binaryName = getBasenameFromUrl(binaryUrl);
+            if (isRestart) {
+                return [
+                    `cd qbob`,
+                    `CURRENT_BINARY=$(cat binary_name.txt)`,
+                    `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json"`,
+                    `screen -dmS keydb bash -lc "keydb-server --storage-provider flash /data/flash/db --maxmemory 8G --maxmemory-policy allkeys-lru"`,
+                ];
+            }
+
+            let currentBobConfig = {
+                ...DEFAULT_BOB_CONFIG,
+                "p2p-node": peers
+                    .filter((p) => p && p.startsWith("bob:"))
+                    .map((p) => p.trim()),
+                "trusted-node": peers
+                    .filter((p) => p && p.startsWith("BM:"))
+                    .map((p) => p.trim()),
+            };
             return [
-                `mkdir -p qubic-bob && cd qubic-bob`,
+                `rm -rf qbob`,
+                `mkdir -p qbob`,
+                `cd qbob`,
                 `wget ${binaryUrl}`,
-                `chmod +x QubicBob`,
+                `chmod +x ./${binaryName}`,
+                `wget ${epochFile}`,
+                getUnzipCommandFromUrl(epochFile),
+                // Write default config to config.json
+                `echo '${JSON.stringify(currentBobConfig)}' > bob_config.json`,
+                // Beautify the config file using jq
+                `jq . bob_config.json > temp_config.json && mv temp_config.json bob_config.json`,
+                `echo "${binaryName}" > binary_name.txt`,
+                `CURRENT_BINARY=$(cat binary_name.txt)`,
+                `screen -dmS keydb bash -lc "keydb-server --storage-provider flash /data/flash/db --maxmemory 8G --maxmemory-policy allkeys-lru"`,
+                `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
+                `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`,
             ];
         },
 
@@ -86,7 +148,10 @@ export namespace SSHService {
                 ];
             } else if (type === MongoDbTypes.ServiceType.BobNode) {
                 return [
+                    `pkill keydb-server`,
                     `for s in $(screen -ls | awk '/${BOB_SCREEN_NAME}/ {print $1}'); do screen -S "$s" -X quit; done`,
+                    `for s in $(screen -ls | awk '/keydb/ {print $1}'); do screen -S "$s" -X quit; done`,
+                    `while pgrep -x keydb-server >/dev/null; do sleep 1; done`,
                 ];
             } else {
                 return [];
@@ -170,7 +235,7 @@ export namespace SSHService {
             host,
             username,
             password,
-            commands,
+            [inlineBashCommands(commands)],
             0,
             {
                 isNonInteractive: true,
@@ -213,7 +278,16 @@ export namespace SSHService {
         let commands: string[] = [];
         commands.push(Scripts.getShutdownCommands(type).join("; "));
 
-        let result = await executeCommands(host, username, password, commands);
+        let result = await executeCommands(
+            host,
+            username,
+            password,
+            commands,
+            0,
+            {
+                isNonInteractive: true,
+            }
+        );
         return {
             stdouts: result.stdouts,
             stderrs: result.stderrs,
@@ -232,7 +306,16 @@ export namespace SSHService {
             if (cmd && cmd?.trim() !== "") commands.push(cmd);
         }
         logger.info(`Restart commands for ${host}@${username}: ${commands}`);
-        let result = await executeCommands(host, username, password, commands);
+        let result = await executeCommands(
+            host,
+            username,
+            password,
+            commands,
+            0,
+            {
+                isNonInteractive: true,
+            }
+        );
         return {
             stdouts: result.stdouts,
             stderrs: result.stderrs,
@@ -268,7 +351,13 @@ export namespace SSHService {
                     })
                 );
             } else if (type === MongoDbTypes.ServiceType.BobNode) {
-                commands.push(...Scripts.getBobNodeSetupScripts({ binaryUrl }));
+                commands.push(
+                    ...Scripts.getBobNodeSetupScripts({
+                        binaryUrl,
+                        epochFile,
+                        peers,
+                    })
+                );
             } else {
                 return {
                     stdouts: {},
@@ -380,13 +469,19 @@ export namespace SSHService {
         let isSuccess = false;
 
         commands.unshift("exec 2>&1"); // Redirect stderr to stdout
+        commands.filter((cmd) => cmd && !cmd.trim().startsWith("#"));
 
         try {
             const emitter = new EventEmitter();
             const conn = new Client();
+            logger.info(
+                `Starting SSH command execution for ${host}@${username}...`
+            );
 
             cleanUpSSHMap[host] = () => {
-                conn.end();
+                try {
+                    conn.end();
+                } catch (error) {}
             };
 
             const handleOnData = (data: any, command?: string) => {
@@ -422,8 +517,10 @@ export namespace SSHService {
                     }
                 }
             };
-
             conn.on("ready", async () => {
+                logger.info(
+                    `SSH Connection ready for ${host}@${username}. Executing commands...`
+                );
                 if (!extraData.isNonInteractive) {
                     conn.shell(
                         {
@@ -458,31 +555,25 @@ export namespace SSHService {
                     let totalExecuted = 0;
                     for (const command of commands) {
                         try {
-                            new Promise<void>((resolve, reject) => {
-                                conn.exec(command, (err, stream) => {
-                                    if (err) {
-                                        reject(err);
-                                        return;
-                                    }
+                            conn.exec(command, (err, stream) => {
+                                if (err) {
+                                    emitter.emit("error", err);
+                                    return;
+                                }
 
-                                    stream
-                                        .on("close", () => {
-                                            totalExecuted += 1;
-                                            if (
-                                                totalExecuted ===
-                                                commands.length
-                                            ) {
-                                                emitter.emit("done");
-                                            }
-                                            resolve();
-                                        })
-                                        .on("data", (data: any) => {
-                                            handleOnData(data, command);
-                                        })
-                                        .stderr.on("data", (data) => {
-                                            handleOnErrorData(data, command);
-                                        });
-                                });
+                                stream
+                                    .on("close", () => {
+                                        totalExecuted += 1;
+                                        if (totalExecuted === commands.length) {
+                                            emitter.emit("done");
+                                        }
+                                    })
+                                    .on("data", (data: any) => {
+                                        handleOnData(data, command);
+                                    })
+                                    .stderr.on("data", (data) => {
+                                        handleOnErrorData(data, command);
+                                    });
                             });
                         } catch (error) {
                             emitter.emit("error", error);
@@ -539,8 +630,6 @@ export namespace SSHService {
                     );
                 });
             });
-
-            emitter.removeAllListeners();
         } catch (error) {
             logger.error(
                 `SSH command execution for ${host}@${username} error: ${error}`

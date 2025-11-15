@@ -24,7 +24,8 @@ export namespace MongoDbTypes {
 
     export interface CommandLog {
         operator: string;
-        server?: string;
+        // A command may run a mutilple servers
+        servers?: string[];
         command: string;
         // standard command indicates if the command is one of the predefined commands like shutdown or restart
         isStandardCommand: boolean;

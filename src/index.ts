@@ -8,8 +8,10 @@ import { SocketServer } from "./http/socket-server.js";
 
 function checkEnvVariables() {
     const requiredVars = [
-        "GITHUB_USER",
-        "GITHUB_REPO",
+        "GITHUB_LITE_NODE_USER",
+        "GITHUB_LITE_NODE_REPO",
+        "GITHUB_BOB_NODE_USER",
+        "GITHUB_BOB_NODE_REPO",
         "GITHUB_TOKEN",
         "JWT_SECRET",
     ];

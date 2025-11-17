@@ -16,6 +16,7 @@ namespace NodeService {
         initialTick: number;
         lastUpdated: number;
         lastTickChanged: number;
+        isPrivate?: boolean;
     }
 
     export interface BobNodeTickInfo {
@@ -28,6 +29,7 @@ namespace NodeService {
         initialTick: number;
         lastUpdated: number;
         lastTickChanged: number;
+        isPrivate?: boolean;
     }
 
     let _currentLiteNodes: MongoDbTypes.LiteNode[] = [];

@@ -107,8 +107,9 @@ export namespace SSHService {
                 return [
                     `cd qbob`,
                     `CURRENT_BINARY=$(cat binary_name.txt)`,
-                    `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json"`,
                     `screen -dmS keydb bash -lc "keydb-server --storage-provider flash /data/flash/db --maxmemory 8G --maxmemory-policy allkeys-lru"`,
+                    `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
+                    `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`,
                 ];
             }
 
@@ -123,6 +124,8 @@ export namespace SSHService {
             };
             return [
                 `rm -rf qbob`,
+                `rm -rf /data/flash/db/*`,
+                `mkdir -p /data/flash/db`,
                 `mkdir -p qbob`,
                 `cd qbob`,
                 `wget ${binaryUrl}`,
@@ -148,9 +151,9 @@ export namespace SSHService {
                 ];
             } else if (type === MongoDbTypes.ServiceType.BobNode) {
                 return [
-                    `pkill keydb-server`,
-                    `for s in $(screen -ls | awk '/${BOB_SCREEN_NAME}/ {print $1}'); do screen -S "$s" -X quit; done`,
-                    `for s in $(screen -ls | awk '/keydb/ {print $1}'); do screen -S "$s" -X quit; done`,
+                    `pkill keydb-server || true`,
+                    `for s in $(screen -ls | awk '/${BOB_SCREEN_NAME}/ {print $1}'); do screen -S "$s" -X quit || true; done`,
+                    `for s in $(screen -ls | awk '/keydb/ {print $1}'); do screen -S "$s" -X quit || true; done`,
                     `while pgrep -x keydb-server >/dev/null; do sleep 1; done`,
                 ];
             } else {
@@ -171,9 +174,15 @@ export namespace SSHService {
                     ...startCommands,
                 ];
             } else if (type === MongoDbTypes.ServiceType.BobNode) {
+                let startCommands = this.getBobNodeSetupScripts({
+                    binaryUrl: "",
+                    epochFile: "",
+                    peers: [],
+                    isRestart: true,
+                });
                 return [
                     this.getShutdownCommands(type).join("; "),
-                    `screen -dmS ${BOB_SCREEN_NAME} bash -lc "top"`,
+                    ...startCommands,
                 ];
             } else {
                 return [];
@@ -228,6 +237,7 @@ export namespace SSHService {
                 cpu: "",
                 os: "",
                 ram: "",
+                duration: 0,
             };
         }
         // NOTE: Using isNonInteractive to avoid issues with apt freeze the stdin
@@ -266,6 +276,7 @@ export namespace SSHService {
             ram:
                 sysInfo.stdouts[systemInfoCommands.ram]?.replaceAll("\n", "") ||
                 "",
+            duration: result.duration + sysInfo.duration,
         };
     }
 
@@ -292,6 +303,7 @@ export namespace SSHService {
             stdouts: result.stdouts,
             stderrs: result.stderrs,
             isSuccess: result.isSuccess,
+            duration: result.duration,
         };
     }
 
@@ -313,13 +325,14 @@ export namespace SSHService {
             commands,
             0,
             {
-                isNonInteractive: true,
+                isNonInteractive: false,
             }
         );
         return {
             stdouts: result.stdouts,
             stderrs: result.stderrs,
             isSuccess: result.isSuccess,
+            duration: result.duration,
         };
     }
 
@@ -338,6 +351,13 @@ export namespace SSHService {
             peers: string[];
         }
     ) {
+        const returnFailedObject = {
+            stdouts: {},
+            stderrs: {},
+            isSuccess: false,
+            duration: 0,
+        };
+
         try {
             const commands = [];
             commands.push(...Scripts.getShutdownCommands(type));
@@ -359,11 +379,7 @@ export namespace SSHService {
                     })
                 );
             } else {
-                return {
-                    stdouts: {},
-                    stderrs: {},
-                    isSuccess: false,
-                };
+                return returnFailedObject;
             }
 
             let currentServer = await Mongodb.getServersCollection().findOne({
@@ -371,33 +387,21 @@ export namespace SSHService {
             });
 
             if (!currentServer) {
-                return {
-                    stdouts: {},
-                    stderrs: {},
-                    isSuccess: false,
-                };
+                return returnFailedObject;
             }
 
             if (
                 currentServer.deployStatus?.liteNode === "setting_up" &&
                 type === MongoDbTypes.ServiceType.LiteNode
             ) {
-                return {
-                    stdouts: {},
-                    stderrs: {},
-                    isSuccess: false,
-                };
+                return returnFailedObject;
             }
 
             if (
                 currentServer.deployStatus?.bobNode === "setting_up" &&
                 type === MongoDbTypes.ServiceType.BobNode
             ) {
-                return {
-                    stdouts: {},
-                    stderrs: {},
-                    isSuccess: false,
-                };
+                return returnFailedObject;
             }
 
             await Mongodb.getServersCollection().updateOne(
@@ -426,13 +430,10 @@ export namespace SSHService {
                 stdouts: result.stdouts,
                 stderrs: result.stderrs,
                 isSuccess: result.isSuccess,
+                duration: result.duration,
             };
         } catch (error) {
-            return {
-                stdouts: {},
-                stderrs: {},
-                isSuccess: false,
-            };
+            return returnFailedObject;
         }
     }
 
@@ -456,6 +457,7 @@ export namespace SSHService {
             isNonInteractive?: boolean;
         } = {}
     ) {
+        let startTime = Date.now();
         await _accquireExecutionLock(host);
 
         let stdouts: {
@@ -499,7 +501,6 @@ export namespace SSHService {
             };
 
             const handleOnErrorData = (data: any, command?: string) => {
-                let criticalErors = [": syntax error:"];
                 const errorOutput = stripAnsi(data.toString());
                 logger.error(`SSH Error Output: ${errorOutput}`);
                 if (command) {
@@ -507,21 +508,17 @@ export namespace SSHService {
                 } else {
                     stderrs["shell"] = (stderrs["shell"] || "") + errorOutput;
                 }
-                for (let critical of criticalErors) {
-                    if (errorOutput.includes(critical)) {
-                        emitter.emit(
-                            "error",
-                            new Error(`Critical SSH Error: ${errorOutput}`)
-                        );
-                        return;
-                    }
-                }
             };
             conn.on("ready", async () => {
                 logger.info(
                     `SSH Connection ready for ${host}@${username}. Executing commands...`
                 );
                 if (!extraData.isNonInteractive) {
+                    commands.unshift("set -e"); // Exit on error
+                    commands.unshift("QDONE=qdone_signal");
+                    commands.push(`echo "GETHERE@$QDONE"`);
+                    const expectedDoneSignalStr = `GETHERE@qdone_signal`;
+                    let isDoneSignalReceived = false;
                     conn.shell(
                         {
                             width: 640 * 3,
@@ -535,9 +532,19 @@ export namespace SSHService {
 
                             stream
                                 .on("close", () => {
-                                    emitter.emit("done");
+                                    emitter.emit("done", {
+                                        isDoneSignalReceived,
+                                    });
                                 })
                                 .on("data", (data: any) => {
+                                    // If the done signal is received, mark as done (no commands failed)
+                                    if (
+                                        data
+                                            .toString()
+                                            .includes(expectedDoneSignalStr)
+                                    ) {
+                                        isDoneSignalReceived = true;
+                                    }
                                     handleOnData(data);
                                 })
                                 .stderr.on("data", (data) => {
@@ -553,6 +560,7 @@ export namespace SSHService {
                     );
                 } else {
                     let totalExecuted = 0;
+                    let isDoneSignalReceived = true;
                     for (const command of commands) {
                         try {
                             conn.exec(command, (err, stream) => {
@@ -560,12 +568,16 @@ export namespace SSHService {
                                     emitter.emit("error", err);
                                     return;
                                 }
-
                                 stream
-                                    .on("close", () => {
+                                    .on("close", (code: number) => {
+                                        if (code !== 0) {
+                                            isDoneSignalReceived = false;
+                                        }
                                         totalExecuted += 1;
                                         if (totalExecuted === commands.length) {
-                                            emitter.emit("done");
+                                            emitter.emit("done", {
+                                                isDoneSignalReceived,
+                                            });
                                         }
                                     })
                                     .on("data", (data: any) => {
@@ -602,13 +614,13 @@ export namespace SSHService {
             }
 
             await new Promise<void>((resolve, reject) => {
-                emitter.on("done", () => {
+                emitter.on("done", ({ isDoneSignalReceived }) => {
                     if (isFinallyDone) return;
 
                     if (cleanUpSSHMap[host]) {
                         cleanUpSSHMap[host]();
                     }
-                    isSuccess = true;
+                    isSuccess = isDoneSignalReceived;
                     isFinallyDone = true;
                     resolve();
                     logger.info(
@@ -637,8 +649,10 @@ export namespace SSHService {
         }
 
         await _releaseExecutionLock(host);
+        let endTime = Date.now();
+        let durationInMillis = endTime - startTime;
         delete cleanUpSSHMap[host];
-        return { stdouts, stderrs, isSuccess };
+        return { stdouts, stderrs, isSuccess, duration: durationInMillis };
     }
 
     export async function startRequestExecuteCommandsProcessor() {

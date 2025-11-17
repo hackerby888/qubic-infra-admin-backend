@@ -2,7 +2,6 @@ import { Server, type Socket } from "socket.io";
 import { logger } from "../utils/logger.js";
 import { Mongodb, MongoDbTypes } from "../database/db.js";
 import { SSHService } from "../services/ssh-service.js";
-import { log } from "console";
 
 declare module "socket.io" {
     interface Socket {

@@ -8,7 +8,13 @@ let client: MongoClient;
 let db: Db;
 
 export namespace MongoDbTypes {
-    export type NodeStatus = "setting_up" | "active" | "error";
+    export type NodeStatus =
+        | "setting_up"
+        | "active"
+        | "error"
+        | "stopped"
+        | "restarting";
+    export type CommandStatus = "pending" | "completed" | "failed";
 
     export interface LiteNode {
         server: string;
@@ -32,8 +38,9 @@ export namespace MongoDbTypes {
         stdout: string;
         stderr: string;
         timestamp: number;
-        status: "pending" | "completed" | "failed";
+        status: CommandStatus;
         uuid: string;
+        duration: number;
     }
 
     export enum ServiceType {
@@ -76,6 +83,7 @@ export namespace MongoDbTypes {
         username: string;
         passwordHash: string;
         role: "admin" | "operator";
+        insertedAt: number;
     }
 }
 
@@ -102,7 +110,7 @@ export namespace Mongodb {
             { server: 1 },
             { unique: true }
         );
-        await getUserCollection().createIndex(
+        await getUsersCollection().createIndex(
             { username: 1 },
             { unique: true }
         );
@@ -139,7 +147,7 @@ export namespace Mongodb {
         return getDB().collection<MongoDbTypes.Server>("servers");
     }
 
-    export function getUserCollection() {
+    export function getUsersCollection() {
         return getDB().collection<MongoDbTypes.User>("users");
     }
 
@@ -171,13 +179,13 @@ export namespace Mongodb {
         username: string,
         passwordHash: string
     ): Promise<MongoDbTypes.User | null> {
-        const collection = getUserCollection();
+        const collection = getUsersCollection();
         const user = await collection.findOne({ username, passwordHash });
         return user || null;
     }
 
     export async function createUser(user: MongoDbTypes.User): Promise<void> {
-        const collection = getUserCollection();
+        const collection = getUsersCollection();
         await collection.insertOne(user);
     }
 

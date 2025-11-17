@@ -8,6 +8,7 @@ import { Mongodb, MongoDbTypes } from "../database/db.js";
 import { SSHService } from "../services/ssh-service.js";
 import { checkLink } from "../utils/common.js";
 import { v4 as uuidv4 } from "uuid";
+import { millisToSeconds } from "../utils/time.js";
 
 declare global {
     namespace Express {
@@ -71,7 +72,7 @@ namespace HttpServer {
             res.json({ servers });
         });
 
-        app.get("/servers-status", (req, res) => {
+        app.get("/servers-status", async (req, res) => {
             let operator = req.query.operator as string | undefined;
             let statuses = NodeService.getStatus();
             if (operator) {
@@ -83,8 +84,101 @@ namespace HttpServer {
                     (status) => status.operator === operator
                 );
             }
+
+            let liteNodesServer: string[] = statuses.liteNodes.map(
+                (node) => node.server
+            );
+            let bobNodesServer: string[] = statuses.bobNodes.map(
+                (node) => node.server
+            );
+
+            let liteNodesFromDb = await Mongodb.getLiteNodeCollection()
+                .find({ server: { $in: liteNodesServer } })
+                .toArray();
+            let bobNodesFromDb = await Mongodb.getBobNodeCollection()
+                .find({ server: { $in: bobNodesServer } })
+                .toArray();
+
+            // If no operator is provided, filter out private nodes
+            if (!operator) {
+                // Only return if isPrivate is false
+                statuses.liteNodes = statuses.liteNodes.filter((status) => {
+                    let nodeDoc = liteNodesFromDb.find(
+                        (node) => node.server === status.server
+                    );
+                    return nodeDoc ? !nodeDoc.isPrivate : true;
+                });
+
+                statuses.bobNodes = statuses.bobNodes.filter((status) => {
+                    let nodeDoc = bobNodesFromDb.find(
+                        (node) => node.server === status.server
+                    );
+                    return nodeDoc ? !nodeDoc.isPrivate : true;
+                });
+            }
+
+            statuses.liteNodes = statuses.liteNodes.map((status) => {
+                let nodeDoc = liteNodesFromDb.find(
+                    (node) => node.server === status.server
+                );
+                return {
+                    ...status,
+                    isPrivate: nodeDoc ? nodeDoc.isPrivate : false,
+                };
+            });
+            statuses.bobNodes = statuses.bobNodes.map((status) => {
+                let nodeDoc = bobNodesFromDb.find(
+                    (node) => node.server === status.server
+                );
+                return {
+                    ...status,
+                    isPrivate: nodeDoc ? nodeDoc.isPrivate : false,
+                };
+            });
+
             res.json({ statuses });
         });
+
+        app.post(
+            "/change-visibility",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let server: string = req.body.server;
+                    let service: MongoDbTypes.ServiceType = req.body.service;
+                    let isPrivate: boolean = req.body.isPrivate;
+                    let operator = req.user!.username;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (!server) {
+                        res.status(400).json({ error: "Missing server" });
+                        return;
+                    }
+                    if (service === MongoDbTypes.ServiceType.LiteNode) {
+                        await Mongodb.getLiteNodeCollection().updateOne(
+                            { server: server, operator: operator },
+                            { $set: { isPrivate: !!isPrivate } }
+                        );
+                    } else if (service === MongoDbTypes.ServiceType.BobNode) {
+                        await Mongodb.getBobNodeCollection().updateOne(
+                            { server: server, operator: operator },
+                            { $set: { isPrivate: !!isPrivate } }
+                        );
+                    } else {
+                        res.status(400).json({ error: "Invalid service type" });
+                        return;
+                    }
+                    res.json({ message: "Visibility updated successfully" });
+                } catch (error) {
+                    logger.error(
+                        `Error changing visibility: ${(error as Error).message}`
+                    );
+                    res.status(500).json({ error: "Internal server error" });
+                }
+            }
+        );
 
         app.get("/request-shudown", async (req, res) => {
             let server = req.query.server as string;
@@ -151,16 +245,19 @@ namespace HttpServer {
                     status: "pending",
                     uuid: currentUUID,
                     isStandardCommand: true,
+                    duration: 0,
                 });
 
                 const updateCommandLogToDb = ({
                     stdout,
                     stderr,
                     status,
+                    duration,
                 }: {
                     stdout: string;
                     stderr: string;
                     status: "pending" | "completed" | "failed";
+                    duration: number;
                 }) => {
                     Mongodb.getCommandLogsCollection()
                         .updateOne(
@@ -173,10 +270,45 @@ namespace HttpServer {
                                     stderr: stderr,
                                     status: status,
                                 },
+                                $inc: {
+                                    duration: duration,
+                                },
                             }
                         )
                         .then()
-                        .catch((error) => {});
+                        .catch((error) => {
+                            logger.error(
+                                `Error updating command log: ${
+                                    (error as Error).message
+                                }`
+                            );
+                        });
+                };
+
+                const updateNodeDeloyStatusToDb = ({
+                    server,
+                    service,
+                    status,
+                }: {
+                    server: string;
+                    service: MongoDbTypes.ServiceType;
+                    status: MongoDbTypes.NodeStatus;
+                }) => {
+                    Mongodb.getServersCollection()
+                        .updateOne({ server: server }, [
+                            {
+                                $set: {
+                                    deployStatus: {
+                                        $mergeObjects: [
+                                            "$deployStatus",
+                                            { [service]: status },
+                                        ],
+                                    },
+                                },
+                            },
+                        ])
+                        .then()
+                        .catch(() => {});
                 };
 
                 let currentStdout = "";
@@ -195,21 +327,18 @@ namespace HttpServer {
                                 service
                             )
                                 .then(
-                                    async ({ stdouts, stderrs, isSuccess }) => {
+                                    async ({
+                                        stdouts,
+                                        stderrs,
+                                        isSuccess,
+                                        duration,
+                                    }) => {
                                         totalCommandsExecuted++;
                                         if (isSuccess) {
-                                            let isOk =
-                                                Object.values(stdouts)
-                                                    .join("\n")
-                                                    .trim() === "";
                                             currentStdout +=
                                                 "\n" +
                                                 `---------- Shutdown log for ${service} on ${serverObject.server} ----------- \n\n`;
-                                            currentStdout += isOk
-                                                ? "OK"
-                                                : Object.values(stdouts).join(
-                                                      "\n"
-                                                  );
+                                            currentStdout += "Okay\n";
                                             currentStderr +=
                                                 Object.values(stderrs).join(
                                                     "\n"
@@ -222,15 +351,43 @@ namespace HttpServer {
                                                     totalCommandsToExecute
                                                         ? "completed"
                                                         : "pending",
+                                                duration: duration,
+                                            });
+                                            updateNodeDeloyStatusToDb({
+                                                server: serverObject.server,
+                                                service: service,
+                                                status: "stopped",
+                                            });
+                                        } else {
+                                            updateCommandLogToDb({
+                                                stdout: Object.values(
+                                                    stdouts
+                                                ).join("\n"),
+                                                stderr: Object.values(
+                                                    stderrs
+                                                ).join("\n"),
+                                                status: "failed",
+                                                duration: duration,
+                                            });
+                                            updateNodeDeloyStatusToDb({
+                                                server: serverObject.server,
+                                                service: service,
+                                                status: "error",
                                             });
                                         }
                                     }
                                 )
                                 .catch((error) => {
                                     updateCommandLogToDb({
-                                        stdout: "",
+                                        stdout: (error as Error).message,
                                         stderr: (error as Error).message,
                                         status: "failed",
+                                        duration: 0,
+                                    });
+                                    updateNodeDeloyStatusToDb({
+                                        server: serverObject.server,
+                                        service: service,
+                                        status: "error",
                                     });
                                 });
                         }
@@ -238,6 +395,11 @@ namespace HttpServer {
                 } else if (command == "restart") {
                     for (let service of services) {
                         for (let serverObject of serverDocs) {
+                            updateNodeDeloyStatusToDb({
+                                server: serverObject.server,
+                                service: service,
+                                status: "restarting",
+                            });
                             SSHService.restartNode(
                                 serverObject.server,
                                 serverObject.username,
@@ -245,25 +407,20 @@ namespace HttpServer {
                                 service
                             )
                                 .then(
-                                    async ({ stdouts, stderrs, isSuccess }) => {
+                                    async ({
+                                        stdouts,
+                                        stderrs,
+                                        isSuccess,
+                                        duration,
+                                    }) => {
                                         totalCommandsExecuted++;
+                                        currentStderr +=
+                                            Object.values(stderrs).join("\n");
                                         if (isSuccess) {
-                                            let isOk =
-                                                Object.values(stdouts)
-                                                    .join("\n")
-                                                    .trim() !== "";
                                             currentStdout +=
                                                 "\n" +
                                                 `---------- Restart log for ${service} on ${serverObject.server} ----------- \n\n`;
-                                            currentStdout += isOk
-                                                ? "OK"
-                                                : Object.values(stdouts).join(
-                                                      "\n"
-                                                  );
-                                            currentStderr +=
-                                                Object.values(stderrs).join(
-                                                    "\n"
-                                                );
+                                            currentStdout += "Okay\n";
                                             updateCommandLogToDb({
                                                 stdout: currentStdout,
                                                 stderr: currentStderr,
@@ -272,23 +429,46 @@ namespace HttpServer {
                                                     totalCommandsToExecute
                                                         ? "completed"
                                                         : "pending",
+                                                duration: duration,
+                                            });
+                                            updateNodeDeloyStatusToDb({
+                                                server: serverObject.server,
+                                                service: service,
+                                                status: "active",
                                             });
                                         } else {
+                                            currentStdout +=
+                                                "\n" +
+                                                `---------- Restart log for ${service} on ${serverObject.server} ----------- \n\n`;
+                                            currentStdout +=
+                                                Object.values(stdouts).join(
+                                                    "\n"
+                                                );
                                             updateCommandLogToDb({
-                                                stdout: "",
-                                                stderr: Object.values(
-                                                    stderrs
-                                                ).join("\n"),
+                                                stdout: currentStdout,
+                                                stderr: currentStderr,
                                                 status: "failed",
+                                                duration: duration,
+                                            });
+                                            updateNodeDeloyStatusToDb({
+                                                server: serverObject.server,
+                                                service: service,
+                                                status: "error",
                                             });
                                         }
                                     }
                                 )
                                 .catch((error) => {
                                     updateCommandLogToDb({
-                                        stdout: "",
+                                        stdout: (error as Error).message,
                                         stderr: (error as Error).message,
                                         status: "failed",
+                                        duration: 0,
+                                    });
+                                    updateNodeDeloyStatusToDb({
+                                        server: serverObject.server,
+                                        service: service,
+                                        status: "error",
                                     });
                                 });
                         }
@@ -408,6 +588,47 @@ namespace HttpServer {
                 return;
             }
 
+            const databaseUpdater = ({
+                server,
+                service,
+                stdout,
+                stderr,
+                status,
+            }: {
+                server: string;
+                service: MongoDbTypes.ServiceType;
+                stdout: string;
+                stderr: string;
+                status: "pending" | "active" | "error";
+            }) => {
+                Mongodb.getServersCollection()
+                    .updateOne({ server: server }, [
+                        {
+                            $set: {
+                                deployStatus: {
+                                    $mergeObjects: [
+                                        "$deployStatus",
+                                        { [service]: status },
+                                    ],
+                                },
+                                deployLogs: {
+                                    $mergeObjects: [
+                                        "$deployLogs",
+                                        {
+                                            [service]: {
+                                                stdout: stdout,
+                                                stderr: stderr,
+                                            },
+                                        },
+                                    ],
+                                },
+                            },
+                        },
+                    ])
+                    .then()
+                    .catch(() => {});
+            };
+
             // Deploy to each server
             try {
                 for (let server of serverDocs) {
@@ -425,64 +646,37 @@ namespace HttpServer {
                     )
                         .then((result) => {
                             if (result.isSuccess) {
-                                Mongodb.getServersCollection()
-                                    .updateOne(
-                                        { server: server.server },
-                                        {
-                                            $set: {
-                                                deployStatus: {
-                                                    ...server.deployStatus,
-                                                    [service]: "active",
-                                                },
-                                                deployLogs: {
-                                                    ...server.deployLogs,
-                                                    [service]: {
-                                                        stdout: Object.values(
-                                                            result.stdouts
-                                                        ).join("\n"),
-                                                        stderr: Object.values(
-                                                            result.stderrs
-                                                        ).join("\n"),
-                                                    },
-                                                },
-                                            },
-                                        }
-                                    )
-                                    .then()
-                                    .catch((error) => {});
+                                databaseUpdater({
+                                    server: server.server,
+                                    service: service,
+                                    stdout:
+                                        `---------- Time elapsed ${millisToSeconds(
+                                            result.duration
+                                        )} seconds ----------- \n\n` +
+                                        Object.values(result.stdouts).join(
+                                            "\n"
+                                        ),
+                                    stderr: Object.values(result.stderrs).join(
+                                        "\n"
+                                    ),
+                                    status: "active",
+                                });
                             } else {
-                                logger.error(`Deployment to ${server} failed.`);
-                                Mongodb.getServersCollection()
-                                    .updateOne(
-                                        { server: server.server },
-                                        {
-                                            $set: {
-                                                deployStatus: {
-                                                    ...server.deployStatus,
-                                                    [service]: "error",
-                                                },
-                                                deployLogs: {
-                                                    ...server.deployLogs,
-                                                    [service]: {
-                                                        stdout: Object.values(
-                                                            result.stdouts
-                                                        ).join("\n"),
-                                                        stderr: Object.values(
-                                                            result.stderrs
-                                                        ).join("\n"),
-                                                    },
-                                                },
-                                            },
-                                        }
-                                    )
-                                    .then()
-                                    .catch((error) => {
-                                        logger.error(
-                                            `Error updating deploy logs for ${
-                                                server.server
-                                            }: ${(error as Error).message}`
-                                        );
-                                    });
+                                databaseUpdater({
+                                    server: server.server,
+                                    service: service,
+                                    stdout:
+                                        `---------- Time elapsed ${millisToSeconds(
+                                            result.duration
+                                        )} seconds ----------- \n` +
+                                        Object.values(result.stdouts).join(
+                                            "\n"
+                                        ),
+                                    stderr: Object.values(result.stderrs).join(
+                                        "\n"
+                                    ),
+                                    status: "error",
+                                });
                             }
                         })
                         .catch((error) => {
@@ -491,34 +685,13 @@ namespace HttpServer {
                                     (error as Error).message
                                 }`
                             );
-                            Mongodb.getServersCollection()
-                                .updateOne(
-                                    { server: server.server },
-                                    {
-                                        $set: {
-                                            deployStatus: {
-                                                ...server.deployStatus,
-                                                [service]: "error",
-                                            },
-                                            deployLogs: {
-                                                ...server.deployLogs,
-                                                [service]: {
-                                                    stdout: "",
-                                                    stderr: (error as Error)
-                                                        .message,
-                                                },
-                                            },
-                                        },
-                                    }
-                                )
-                                .then()
-                                .catch((err) => {
-                                    logger.error(
-                                        `Error updating deploy logs for ${
-                                            server.server
-                                        }: ${(err as Error).message}`
-                                    );
-                                });
+                            databaseUpdater({
+                                server: server.server,
+                                service: service,
+                                stdout: "",
+                                stderr: (error as Error).message,
+                                status: "error",
+                            });
                         });
                 }
             } catch (error) {
@@ -558,30 +731,97 @@ namespace HttpServer {
             }
         });
 
-        app.post("/register", async (req, res) => {
-            try {
-                if (!req.user || req.user.role !== "admin") {
-                    res.status(403).json({
-                        error: "Admin privileges required",
-                    });
+        app.get(
+            "/operators",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    const operators = await Mongodb.getUsersCollection()
+                        .find({})
+                        .project({ _id: 0, passwordHash: 0 })
+                        .toArray();
+                    res.json({ operators });
+                } catch (error) {
+                    logger.error(
+                        `Fetch operators error: ${(error as Error).message}`
+                    );
+                    res.status(500).json({ error: "Internal server error" });
                     return;
                 }
-                const { username, passwordHash, role } = req.body;
-                if (!username || !passwordHash || !role) {
-                    res.status(400).json({
-                        error: "Missing username, passwordHash, or role",
-                    });
-                    return;
-                }
-
-                await Mongodb.createUser({ username, passwordHash, role });
-                res.json({ message: "User registered successfully" });
-            } catch (error) {
-                logger.error(`Registration error: ${(error as Error).message}`);
-                res.status(500).json({ error: "Internal server error" });
-                return;
             }
-        });
+        );
+
+        app.delete(
+            "/operators",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    if (!req.user || req.user.role !== "admin") {
+                        res.status(403).json({
+                            error: "Admin privileges required",
+                        });
+                        return;
+                    }
+                    const { username } = req.body;
+                    if (!username) {
+                        res.status(400).json({
+                            error: "Missing username",
+                        });
+                        return;
+                    }
+                    await Mongodb.getUsersCollection().deleteOne({
+                        username,
+                    });
+                    res.json({ message: "User deleted successfully" });
+                } catch (error) {
+                    logger.error(
+                        `Delete operator error: ${(error as Error).message}`
+                    );
+                    res.status(500).json({ error: "Internal server error" });
+                    return;
+                }
+            }
+        );
+
+        app.post(
+            "/operators",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    if (!req.user || req.user.role !== "admin") {
+                        res.status(403).json({
+                            error: "Admin privileges required",
+                        });
+                        return;
+                    }
+                    const { username, passwordHash, role } = req.body;
+                    if (!username || !passwordHash || !role) {
+                        res.status(400).json({
+                            error: "Missing username, passwordHash, or role",
+                        });
+                        return;
+                    }
+
+                    await Mongodb.createUser({
+                        username,
+                        passwordHash,
+                        role,
+                        insertedAt: Date.now(),
+                    });
+                    res.json({ message: "User registered successfully" });
+                } catch (error) {
+                    logger.error(
+                        `Registration error: ${(error as Error).message}`
+                    );
+                    res.status(500).json({
+                        error:
+                            "Internal server error: " +
+                            (error as Error).message,
+                    });
+                    return;
+                }
+            }
+        );
 
         app.post(
             "/new-servers",
@@ -625,6 +865,26 @@ namespace HttpServer {
                 }
 
                 try {
+                    let currentServers = await Mongodb.getServersCollection()
+                        .find({})
+                        .project({ _id: 0, server: 1 })
+                        .toArray();
+
+                    // Check if one of the servers already exists
+                    for (let serverData of serversDataNormalized) {
+                        if (
+                            currentServers.find(
+                                (s) => s.server === serverData.server
+                            )
+                        ) {
+                            res.status(400).json({
+                                error: `Server ${serverData.server} already exists`,
+                            });
+                            return;
+                        }
+                    }
+
+                    // Insert new servers into DB
                     await Mongodb.getServersCollection().insertMany(
                         serversDataNormalized
                     );
@@ -648,9 +908,14 @@ namespace HttpServer {
                                                     ram: result.ram,
                                                     status: "active",
                                                     setupLogs: {
-                                                        stdout: Object.values(
-                                                            result.stdouts
-                                                        ).join("\n"),
+                                                        stdout:
+                                                            `---------- Time elapsed ${
+                                                                result.duration /
+                                                                1000
+                                                            } seconds ----------- \n` +
+                                                            Object.values(
+                                                                result.stdouts
+                                                            ).join("\n"),
                                                         stderr: Object.values(
                                                             result.stderrs
                                                         ).join("\n"),
@@ -686,12 +951,22 @@ namespace HttpServer {
                                                 $set: {
                                                     status: "error",
                                                     setupLogs: {
-                                                        stdout: Object.values(
-                                                            result.stdouts
-                                                        ).join("\n"),
-                                                        stderr: Object.values(
-                                                            result.stderrs
-                                                        ).join("\n"),
+                                                        stdout:
+                                                            `---------- Time elapsed ${
+                                                                result.duration /
+                                                                1000
+                                                            } seconds ----------- \n` +
+                                                            Object.values(
+                                                                result.stdouts
+                                                            ).join("\n"),
+                                                        stderr:
+                                                            `---------- Time elapsed ${
+                                                                result.duration /
+                                                                1000
+                                                            } seconds ----------- \n` +
+                                                            Object.values(
+                                                                result.stderrs
+                                                            ).join("\n"),
                                                     },
                                                 },
                                             }
@@ -716,7 +991,7 @@ namespace HttpServer {
                                         }
                                     )
                                     .then()
-                                    .catch((error) => {});
+                                    .catch(() => {});
                             });
                     }
                 } catch (error) {
@@ -1026,6 +1301,7 @@ namespace HttpServer {
                     let currentUUID = uuidv4();
                     await Mongodb.getCommandLogsCollection().insertOne({
                         operator: operator,
+                        servers: servers,
                         command: command,
                         stdout: "",
                         stderr: "",
@@ -1033,7 +1309,84 @@ namespace HttpServer {
                         status: "pending",
                         uuid: currentUUID,
                         isStandardCommand: false,
+                        duration: 0,
                     });
+
+                    const databaseUpdater = async ({
+                        server,
+                        stdout,
+                        stderr,
+                        status,
+                        duration,
+                    }: {
+                        server: string;
+                        stdout: string;
+                        stderr: string;
+                        status: MongoDbTypes.CommandStatus;
+                        duration: number;
+                    }) => {
+                        await Mongodb.getCommandLogsCollection()
+                            .updateOne({ uuid: currentUUID }, [
+                                {
+                                    $set: {
+                                        stdout: {
+                                            $concat: [
+                                                {
+                                                    $ifNull: ["$stdout", ""],
+                                                },
+                                                "\n",
+                                                `---------- Command output for ${server} (${millisToSeconds(
+                                                    duration
+                                                )}s) ----------- \n\n`,
+                                                {
+                                                    $literal: stdout,
+                                                },
+                                            ],
+                                        },
+                                        stderr: {
+                                            $concat: [
+                                                {
+                                                    $ifNull: ["$stderr", ""],
+                                                },
+                                                "\n",
+                                                `---------- Command error for ${server} (${millisToSeconds(
+                                                    duration
+                                                )}s) ----------- \n\n`,
+                                                {
+                                                    $literal: stderr,
+                                                },
+                                            ],
+                                        },
+                                        status: status,
+                                    },
+                                },
+                            ])
+                            .then()
+                            .catch((error) => {
+                                logger.error(
+                                    `Error updating command log: ${
+                                        (error as Error).message
+                                    }`
+                                );
+                            });
+
+                        // Increase duration
+                        await Mongodb.getCommandLogsCollection()
+                            .updateOne(
+                                { uuid: currentUUID },
+                                {
+                                    $inc: { duration: duration },
+                                }
+                            )
+                            .then()
+                            .catch((error) => {
+                                logger.error(
+                                    `Error updating command log duration: ${
+                                        (error as Error).message
+                                    }`
+                                );
+                            });
+                    };
 
                     for (let serverObject of serverDocs) {
                         SSHService.executeCommands(
@@ -1045,69 +1398,39 @@ namespace HttpServer {
                         )
                             .then(async (result) => {
                                 if (result.isSuccess) {
-                                    let currentLogDbObj =
-                                        await Mongodb.getCommandLogsCollection()
-                                            .findOne({ uuid: currentUUID })
-                                            .then()
-                                            .catch((error) => {});
-                                    Mongodb.getCommandLogsCollection().updateOne(
-                                        {
-                                            uuid: currentUUID,
-                                        },
-                                        {
-                                            $set: {
-                                                stdout:
-                                                    (currentLogDbObj?.stdout ||
-                                                        "") +
-                                                    "\n" +
-                                                    `---------- Command output for ${serverObject.server} ----------- \n\n` +
-                                                    Object.values(
-                                                        result.stdouts
-                                                    ).join("\n"),
-                                                stderr: Object.values(
-                                                    result.stderrs
-                                                ).join("\n"),
-                                                status: "completed",
-                                            },
-                                        }
-                                    );
+                                    databaseUpdater({
+                                        server: serverObject.server,
+                                        stdout: Object.values(
+                                            result.stdouts
+                                        ).join("\n"),
+                                        stderr: Object.values(
+                                            result.stderrs
+                                        ).join("\n"),
+                                        status: "completed",
+                                        duration: result.duration,
+                                    });
                                 } else {
-                                    Mongodb.getCommandLogsCollection()
-                                        .updateOne(
-                                            {
-                                                uuid: currentUUID,
-                                            },
-                                            {
-                                                $set: {
-                                                    stdout: "",
-                                                    stderr: Object.values(
-                                                        result.stderrs
-                                                    ).join("\n"),
-                                                    status: "failed",
-                                                },
-                                            }
-                                        )
-                                        .then()
-                                        .catch((error) => {});
+                                    databaseUpdater({
+                                        server: serverObject.server,
+                                        stdout: Object.values(
+                                            result.stdouts
+                                        ).join("\n"),
+                                        stderr: Object.values(
+                                            result.stderrs
+                                        ).join("\n"),
+                                        status: "failed",
+                                        duration: result.duration,
+                                    });
                                 }
                             })
                             .catch((error) => {
-                                Mongodb.getCommandLogsCollection()
-                                    .updateOne(
-                                        {
-                                            uuid: currentUUID,
-                                        },
-                                        {
-                                            $set: {
-                                                stdout: "",
-                                                stderr: (error as Error)
-                                                    .message,
-                                                status: "failed",
-                                            },
-                                        }
-                                    )
-                                    .then()
-                                    .catch((error) => {});
+                                databaseUpdater({
+                                    server: serverObject.server,
+                                    stdout: (error as Error).message,
+                                    stderr: (error as Error).message,
+                                    status: "failed",
+                                    duration: 0,
+                                });
                             });
                     }
 

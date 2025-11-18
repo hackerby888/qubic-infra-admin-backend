@@ -502,6 +502,7 @@ namespace HttpServer {
             let servers: string[] = req.body.servers;
             let service: MongoDbTypes.ServiceType = req.body.service;
             let tag: string = req.body.tag;
+            let operator: string | undefined = req.user?.username;
             let extraData: {
                 epochFile?: string;
                 peers?: string[];
@@ -511,6 +512,13 @@ namespace HttpServer {
                 liteNode: "Qubic",
                 bobNode: "bob",
             };
+
+            if (!operator) {
+                res.json({
+                    error: "No operator found",
+                });
+                return;
+            }
 
             let binaryUrl: string = "";
             try {
@@ -1388,6 +1396,7 @@ namespace HttpServer {
                             });
                     };
 
+                    let commandsExecuted = 0;
                     for (let serverObject of serverDocs) {
                         SSHService.executeCommands(
                             serverObject.server,
@@ -1397,6 +1406,9 @@ namespace HttpServer {
                             30_000
                         )
                             .then(async (result) => {
+                                commandsExecuted++;
+                                let isAllDone =
+                                    commandsExecuted === serverDocs.length;
                                 if (result.isSuccess) {
                                     databaseUpdater({
                                         server: serverObject.server,
@@ -1406,7 +1418,9 @@ namespace HttpServer {
                                         stderr: Object.values(
                                             result.stderrs
                                         ).join("\n"),
-                                        status: "completed",
+                                        status: isAllDone
+                                            ? "completed"
+                                            : "pending",
                                         duration: result.duration,
                                     });
                                 } else {
@@ -1418,17 +1432,22 @@ namespace HttpServer {
                                         stderr: Object.values(
                                             result.stderrs
                                         ).join("\n"),
-                                        status: "failed",
+                                        status: isAllDone
+                                            ? "failed"
+                                            : "pending",
                                         duration: result.duration,
                                     });
                                 }
                             })
                             .catch((error) => {
+                                commandsExecuted++;
+                                let isAllDone =
+                                    commandsExecuted === serverDocs.length;
                                 databaseUpdater({
                                     server: serverObject.server,
                                     stdout: (error as Error).message,
                                     stderr: (error as Error).message,
-                                    status: "failed",
+                                    status: isAllDone ? "failed" : "pending",
                                     duration: 0,
                                 });
                             });

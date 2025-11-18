@@ -1,5 +1,6 @@
 import { MongoClient, Db } from "mongodb";
 import { logger } from "../utils/logger.js";
+import type { IpInfo } from "../utils/ip.js";
 
 const uri = process.env.MONGO_URI || "mongodb://localhost:27017";
 const dbName = process.env.MONGO_DB || "qubic_nodes";
@@ -51,6 +52,7 @@ export namespace MongoDbTypes {
 
     export interface Server {
         server: string;
+        ipInfo?: IpInfo;
         operator: string;
         username: string;
         password: string;

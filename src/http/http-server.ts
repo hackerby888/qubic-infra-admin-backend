@@ -9,6 +9,7 @@ import { SSHService } from "../services/ssh-service.js";
 import { checkLink } from "../utils/common.js";
 import { v4 as uuidv4 } from "uuid";
 import { millisToSeconds } from "../utils/time.js";
+import { lookupIp, type IpInfo } from "../utils/ip.js";
 
 declare global {
     namespace Express {
@@ -846,24 +847,35 @@ namespace HttpServer {
                 }[] = req.body;
                 let operator = req.user?.username;
 
+                let ipInfos: {
+                    [key: string]: IpInfo;
+                } = {};
+
+                for (let server of serversData) {
+                    ipInfos[server.ip] = await lookupIp(server.ip);
+                }
+
                 let serversDataNormalized: MongoDbTypes.Server[] =
-                    serversData.map((server) => ({
-                        server: server.ip,
-                        operator: operator as string,
-                        username: server.username,
-                        password: server.password,
-                        services: [
-                            server.services.liteNode
-                                ? MongoDbTypes.ServiceType.LiteNode
-                                : MongoDbTypes.ServiceType.null,
-                            server.services.bobNode
-                                ? MongoDbTypes.ServiceType.BobNode
-                                : MongoDbTypes.ServiceType.null,
-                        ].filter(
-                            (s) => s !== "null"
-                        ) as MongoDbTypes.ServiceType[],
-                        status: "setting_up",
-                    }));
+                    serversData.map((server) => {
+                        return {
+                            server: server.ip,
+                            ipInfo: ipInfos[server.ip]!,
+                            operator: operator as string,
+                            username: server.username,
+                            password: server.password,
+                            services: [
+                                server.services.liteNode
+                                    ? MongoDbTypes.ServiceType.LiteNode
+                                    : MongoDbTypes.ServiceType.null,
+                                server.services.bobNode
+                                    ? MongoDbTypes.ServiceType.BobNode
+                                    : MongoDbTypes.ServiceType.null,
+                            ].filter(
+                                (s) => s !== "null"
+                            ) as MongoDbTypes.ServiceType[],
+                            status: "setting_up",
+                        };
+                    });
 
                 if (!operator) {
                     res.status(400).json({

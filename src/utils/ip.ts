@@ -7,24 +7,38 @@ export interface IpInfo {
 
 export async function lookupIp(ip: string): Promise<IpInfo> {
     let url = `http://ip-api.com/json/${ip}`;
-    try {
-        let response = await fetch(url);
-        if (!response.ok) {
-            throw new Error(`Failed to fetch IP info: ${response.statusText}`);
+    let retries = 3;
+    while (retries > 0) {
+        try {
+            let response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(
+                    `Failed to fetch IP info: ${response.statusText}`
+                );
+            }
+            let data = await response.json();
+            if (!data.country) {
+                throw new Error("Invalid data received from IP API");
+            }
+            return {
+                country: data.country,
+                region: data.regionName,
+                city: data.city,
+                isp: data.isp,
+            };
+        } catch (error) {
+            console.error(
+                `Error fetching IP info: ${error}. Retries left: ${retries - 1}`
+            );
+            retries--;
+            await new Promise((resolve) => setTimeout(resolve, 1000));
         }
-        let data = await response.json();
-        return {
-            country: data.country || "Unknown",
-            region: data.regionName || "Unknown",
-            city: data.city || "Unknown",
-            isp: data.isp || "Unknown",
-        };
-    } catch (error) {
-        return {
-            country: "Unknown",
-            region: "Unknown",
-            city: "Unknown",
-            isp: "Unknown",
-        };
     }
+
+    return {
+        country: "Unknown",
+        region: "Unknown",
+        city: "Unknown",
+        isp: "Unknown",
+    };
 }

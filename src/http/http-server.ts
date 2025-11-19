@@ -407,7 +407,12 @@ namespace HttpServer {
                                 serverObject.username,
                                 serverObject.password,
                                 serverObject.sshPrivateKey,
-                                service
+                                service,
+                                {
+                                    systemRamInGB: parseInt(
+                                        serverObject.ram || "0"
+                                    ),
+                                }
                             )
                                 .then(
                                     async ({
@@ -654,6 +659,7 @@ namespace HttpServer {
                             binaryUrl,
                             epochFile: extraData?.epochFile as string,
                             peers: extraData?.peers as string[],
+                            systemRamInGB: parseInt(server.ram || "0"),
                         }
                     )
                         .then((result) => {

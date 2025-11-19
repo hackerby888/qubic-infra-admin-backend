@@ -32,6 +32,10 @@ export namespace SSHService {
             "QCTBOBEPDEZGBBCSOWGBYCAIZESDMEVRGLWVNBZAPBIZYEJFFZSPPIVGSCVL",
         ],
         "node-seed": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "is-trusted-node": true,
+        "tick-storage-mode": "free",
+        "max-thread": 16,
+        "spam-qu-threshold": 100,
     };
 
     let _isExecutingCommandsMap: {
@@ -64,6 +68,7 @@ export namespace SSHService {
             // If isRestart is true, skip setup steps and just start the node with existing configs
             if (isRestart) {
                 return [
+                    `cd ~`,
                     `cd qlite`,
                     `CURRENT_PEERS=$(cat peers.txt)`,
                     `CURRENT_BINARY=$(cat binary_name.txt)`,
@@ -74,6 +79,8 @@ export namespace SSHService {
             let peersString = peers.join(",");
             let binaryName = getBasenameFromUrl(binaryUrl);
             return [
+                `date`,
+                `cd ~`,
                 `rm -rf qlite`,
                 `mkdir -p qlite`,
                 `cd qlite`,
@@ -95,19 +102,36 @@ export namespace SSHService {
             epochFile,
             peers,
             isRestart = false,
+            systemRamInGB,
         }: {
             binaryUrl: string;
             epochFile: string;
             peers: string[];
             isRestart?: boolean;
+            systemRamInGB: number;
         }) {
+            const totalRamNeededInSystem = {
+                liteNode: 40,
+                bobNode: 6,
+                system: 2,
+            };
+            let totalRamNeededForKeydbInGB =
+                systemRamInGB -
+                totalRamNeededInSystem.liteNode -
+                totalRamNeededInSystem.bobNode -
+                totalRamNeededInSystem.system;
+
+            if (totalRamNeededForKeydbInGB < 12) {
+                totalRamNeededForKeydbInGB = 12; // Minimum 12GB for keydb
+            }
             // If isRestart is true, skip setup steps and just start the node with existing configs
             let binaryName = getBasenameFromUrl(binaryUrl);
             if (isRestart) {
                 return [
+                    `cd ~`,
                     `cd qbob`,
                     `CURRENT_BINARY=$(cat binary_name.txt)`,
-                    `screen -dmS keydb bash -lc "keydb-server --storage-provider flash /data/flash/db --maxmemory 8G --maxmemory-policy allkeys-lru"`,
+                    `screen -dmS keydb bash -lc "keydb-server --maxmemory ${totalRamNeededForKeydbInGB}G --maxmemory-policy allkeys-lru"`,
                     `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
                     `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`,
                 ];
@@ -123,6 +147,8 @@ export namespace SSHService {
                     .map((p) => p.trim()),
             };
             return [
+                `date`,
+                `cd ~`,
                 `rm -rf qbob`,
                 `rm -rf /data/flash/db/*`,
                 `mkdir -p /data/flash/db`,
@@ -138,30 +164,47 @@ export namespace SSHService {
                 `jq . bob_config.json > temp_config.json && mv temp_config.json bob_config.json`,
                 `echo "${binaryName}" > binary_name.txt`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
-                `screen -dmS keydb bash -lc "keydb-server --storage-provider flash /data/flash/db --maxmemory 8G --maxmemory-policy allkeys-lru"`,
+                `screen -dmS keydb bash -lc "keydb-server --maxmemory ${totalRamNeededForKeydbInGB}G --maxmemory-policy allkeys-lru"`,
                 `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
                 `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`,
             ];
         },
 
-        getShutdownCommands(type: MongoDbTypes.ServiceType) {
+        getShutdownCommands(
+            type: MongoDbTypes.ServiceType,
+            { killDb = false }: { killDb?: boolean } = {}
+        ) {
             if (type === MongoDbTypes.ServiceType.LiteNode) {
                 return [
                     `for s in $(screen -ls | awk '/${LITE_SCREEN_NAME}/ {print $1}'); do screen -S "$s" -X quit; done`,
+                    `cd ~ && cd qlite && LITE_BINARY_NAME=$(cat binary_name.txt) && while pgrep -x $LITE_BINARY_NAME >/dev/null; do sleep 1; done`,
+                    `echo "Debug: LITE_BINARY_NAME=$LITE_BINARY_NAME"`,
                 ];
             } else if (type === MongoDbTypes.ServiceType.BobNode) {
-                return [
+                let killDbCommands = [
                     `pkill keydb-server || true`,
-                    `for s in $(screen -ls | awk '/${BOB_SCREEN_NAME}/ {print $1}'); do screen -S "$s" -X quit || true; done`,
                     `for s in $(screen -ls | awk '/keydb/ {print $1}'); do screen -S "$s" -X quit || true; done`,
                     `while pgrep -x keydb-server >/dev/null; do sleep 1; done`,
+                ];
+                return [
+                    `for s in $(screen -ls | awk '/${BOB_SCREEN_NAME}/ {print $1}'); do screen -S "$s" -X quit || true; done`,
+                    `cd ~ && cd qbob && BOB_BINARY_NAME=$(cat binary_name.txt) && while pgrep -x $BOB_BINARY_NAME >/dev/null; do sleep 1; done`,
+                    ...(killDb ? killDbCommands : []),
+                    `echo "Debug: BOB_BINARY_NAME=$BOB_BINARY_NAME"`,
                 ];
             } else {
                 return [];
             }
         },
 
-        getRestartCommands(type: MongoDbTypes.ServiceType) {
+        getRestartCommands(
+            type: MongoDbTypes.ServiceType,
+            {
+                systemRamInGB,
+            }: {
+                systemRamInGB: number;
+            }
+        ) {
             if (type === MongoDbTypes.ServiceType.LiteNode) {
                 let startCommands = this.getLiteNodeSetupScripts({
                     binaryUrl: "",
@@ -179,6 +222,7 @@ export namespace SSHService {
                     epochFile: "",
                     peers: [],
                     isRestart: true,
+                    systemRamInGB: systemRamInGB,
                 });
                 return [
                     this.getShutdownCommands(type).join("; "),
@@ -317,10 +361,13 @@ export namespace SSHService {
         username: string,
         password: string,
         sshPrivateKey: string,
-        type: MongoDbTypes.ServiceType
+        type: MongoDbTypes.ServiceType,
+        { systemRamInGB }: { systemRamInGB: number }
     ) {
         let commands: string[] = [];
-        for (const cmd of Scripts.getRestartCommands(type)) {
+        for (const cmd of Scripts.getRestartCommands(type, {
+            systemRamInGB,
+        })) {
             if (cmd && cmd?.trim() !== "") commands.push(cmd);
         }
         logger.info(`Restart commands for ${host}@${username}: ${commands}`);
@@ -353,10 +400,12 @@ export namespace SSHService {
             binaryUrl,
             epochFile,
             peers,
+            systemRamInGB,
         }: {
             binaryUrl: string;
             epochFile: string;
             peers: string[];
+            systemRamInGB: number;
         }
     ) {
         const returnFailedObject = {
@@ -368,7 +417,9 @@ export namespace SSHService {
 
         try {
             const commands = [];
-            commands.push(...Scripts.getShutdownCommands(type));
+            commands.push(
+                ...Scripts.getShutdownCommands(type, { killDb: true })
+            );
 
             if (type === MongoDbTypes.ServiceType.LiteNode) {
                 commands.push(
@@ -384,6 +435,7 @@ export namespace SSHService {
                         binaryUrl,
                         epochFile,
                         peers,
+                        systemRamInGB,
                     })
                 );
             } else {

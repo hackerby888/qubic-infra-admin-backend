@@ -226,7 +226,8 @@ export namespace SSHService {
     export async function setupNode(
         host: string,
         username: string,
-        password: string
+        password: string,
+        sshPrivateKey: string
     ) {
         const commands = getSetupCommands();
         if (commands.length === 0) {
@@ -248,6 +249,7 @@ export namespace SSHService {
             [inlineBashCommands(commands)],
             0,
             {
+                sshPrivateKey: sshPrivateKey,
                 isNonInteractive: true,
             }
         );
@@ -259,6 +261,7 @@ export namespace SSHService {
             Object.values(systemInfoCommands),
             0,
             {
+                sshPrivateKey: sshPrivateKey,
                 isNonInteractive: true,
             }
         );
@@ -284,6 +287,7 @@ export namespace SSHService {
         host: string,
         username: string,
         password: string,
+        sshPrivateKey: string,
         type: MongoDbTypes.ServiceType
     ) {
         let commands: string[] = [];
@@ -297,6 +301,7 @@ export namespace SSHService {
             0,
             {
                 isNonInteractive: true,
+                sshPrivateKey: sshPrivateKey,
             }
         );
         return {
@@ -311,6 +316,7 @@ export namespace SSHService {
         host: string,
         username: string,
         password: string,
+        sshPrivateKey: string,
         type: MongoDbTypes.ServiceType
     ) {
         let commands: string[] = [];
@@ -326,6 +332,7 @@ export namespace SSHService {
             0,
             {
                 isNonInteractive: false,
+                sshPrivateKey: sshPrivateKey,
             }
         );
         return {
@@ -340,6 +347,7 @@ export namespace SSHService {
         host: string,
         username: string,
         password: string,
+        sshPrivateKey: string,
         type: MongoDbTypes.ServiceType,
         {
             binaryUrl,
@@ -424,7 +432,11 @@ export namespace SSHService {
                 host,
                 username,
                 password,
-                commands
+                commands,
+                0,
+                {
+                    sshPrivateKey: sshPrivateKey,
+                }
             );
             return {
                 stdouts: result.stdouts,
@@ -455,6 +467,7 @@ export namespace SSHService {
         extraData: {
             onData?: (data: string) => void;
             isNonInteractive?: boolean;
+            sshPrivateKey?: string;
         } = {}
     ) {
         let startTime = Date.now();
@@ -596,11 +609,16 @@ export namespace SSHService {
             }).on("error", (err) => {
                 emitter.emit("error", err);
             });
+
             conn.connect({
                 host: host,
                 port: 22,
                 username: username,
                 password: password,
+                privateKey: (extraData?.sshPrivateKey || "").replace(
+                    /\\n/g,
+                    "\n"
+                ),
             });
 
             let isFinallyDone = false;
@@ -640,12 +658,16 @@ export namespace SSHService {
                     logger.error(
                         `SSH command execution for ${host}@${username} error: ${error}`
                     );
+                    stderrs["shell"] = (stderrs["shell"] || "") + error.message;
                 });
             });
         } catch (error) {
             logger.error(
                 `SSH command execution for ${host}@${username} error: ${error}`
             );
+            stderrs["shell"] =
+                (stderrs["shell"] || "") + (error as Error).message;
+            isSuccess = false;
         }
 
         await _releaseExecutionLock(host);

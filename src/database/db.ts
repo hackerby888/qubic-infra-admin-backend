@@ -79,12 +79,14 @@ export namespace MongoDbTypes {
                 stderr: string;
             };
         };
+        sshPrivateKey: string;
     }
 
     export interface User {
         username: string;
         passwordHash: string;
         role: "admin" | "operator";
+        currentsshPrivateKey?: string;
         insertedAt: number;
     }
 }

@@ -325,6 +325,7 @@ namespace HttpServer {
                                 serverObject.server,
                                 serverObject.username,
                                 serverObject.password,
+                                serverObject.sshPrivateKey,
                                 service
                             )
                                 .then(
@@ -405,6 +406,7 @@ namespace HttpServer {
                                 serverObject.server,
                                 serverObject.username,
                                 serverObject.password,
+                                serverObject.sshPrivateKey,
                                 service
                             )
                                 .then(
@@ -499,7 +501,7 @@ namespace HttpServer {
             res.json(tags);
         });
 
-        app.post("/deploy", async (req, res) => {
+        app.post("/deploy", MiddleWare.authenticateToken, async (req, res) => {
             let servers: string[] = req.body.servers;
             let service: MongoDbTypes.ServiceType = req.body.service;
             let tag: string = req.body.tag;
@@ -515,7 +517,7 @@ namespace HttpServer {
             };
 
             if (!operator) {
-                res.json({
+                res.status(400).json({
                     error: "No operator found",
                 });
                 return;
@@ -646,6 +648,7 @@ namespace HttpServer {
                         server.server,
                         server!.username,
                         server!.password,
+                        server.sshPrivateKey,
                         service,
                         {
                             binaryUrl,
@@ -836,16 +839,26 @@ namespace HttpServer {
             "/new-servers",
             MiddleWare.authenticateToken,
             async (req, res) => {
-                let serversData: {
-                    ip: string;
-                    username: string;
-                    password: string;
-                    services: {
-                        liteNode: boolean;
-                        bobNode: boolean;
-                    };
-                }[] = req.body;
+                let body: {
+                    servers: {
+                        ip: string;
+                        username: string;
+                        password: string;
+                        services: {
+                            liteNode: boolean;
+                            bobNode: boolean;
+                        };
+                    }[];
+                    authType: "password" | "sshKey";
+                } = req.body;
+                let { servers: serversData, authType } = body;
                 let operator = req.user?.username;
+                if (!operator) {
+                    res.status(400).json({
+                        error: "No operator found",
+                    });
+                    return;
+                }
 
                 let ipInfos: {
                     [key: string]: IpInfo;
@@ -855,12 +868,37 @@ namespace HttpServer {
                     ipInfos[server.ip] = await lookupIp(server.ip);
                 }
 
+                let userSshKey = "";
+                try {
+                    // Obtain current user ssh key if auth type is sshKey
+                    if (authType === "sshKey") {
+                        let userDoc =
+                            await Mongodb.getUsersCollection().findOne({
+                                username: operator,
+                            });
+                        if (userDoc && userDoc?.currentsshPrivateKey) {
+                            userSshKey = userDoc.currentsshPrivateKey;
+                        } else {
+                            res.status(400).json({
+                                error: "No SSH key found for user",
+                            });
+                            return;
+                        }
+                    }
+                } catch (error) {
+                    res.json({
+                        error: "Error fetching user ssh key " + error,
+                    });
+                    return;
+                }
+
                 let serversDataNormalized: MongoDbTypes.Server[] =
                     serversData.map((server) => {
                         return {
                             server: server.ip,
                             ipInfo: ipInfos[server.ip]!,
                             operator: operator as string,
+                            sshPrivateKey: userSshKey,
                             username: server.username,
                             password: server.password,
                             services: [
@@ -876,13 +914,6 @@ namespace HttpServer {
                             status: "setting_up",
                         };
                     });
-
-                if (!operator) {
-                    res.status(400).json({
-                        error: "No operator found",
-                    });
-                    return;
-                }
 
                 try {
                     let currentServers = await Mongodb.getServersCollection()
@@ -914,7 +945,8 @@ namespace HttpServer {
                         SSHService.setupNode(
                             serverData.server,
                             serverData.username,
-                            serverData.password
+                            serverData.password,
+                            serverData.sshPrivateKey
                         )
                             .then(async (result) => {
                                 if (result.isSuccess) {
@@ -929,10 +961,9 @@ namespace HttpServer {
                                                     status: "active",
                                                     setupLogs: {
                                                         stdout:
-                                                            `---------- Time elapsed ${
-                                                                result.duration /
-                                                                1000
-                                                            } seconds ----------- \n` +
+                                                            `---------- Time elapsed ${millisToSeconds(
+                                                                result.duration
+                                                            )} seconds ----------- \n\n` +
                                                             Object.values(
                                                                 result.stdouts
                                                             ).join("\n"),
@@ -972,18 +1003,16 @@ namespace HttpServer {
                                                     status: "error",
                                                     setupLogs: {
                                                         stdout:
-                                                            `---------- Time elapsed ${
-                                                                result.duration /
-                                                                1000
-                                                            } seconds ----------- \n` +
+                                                            `---------- Time elapsed ${millisToSeconds(
+                                                                result.duration
+                                                            )} seconds ----------- \n\n` +
                                                             Object.values(
                                                                 result.stdouts
                                                             ).join("\n"),
                                                         stderr:
-                                                            `---------- Time elapsed ${
-                                                                result.duration /
-                                                                1000
-                                                            } seconds ----------- \n` +
+                                                            `---------- Time elapsed ${millisToSeconds(
+                                                                result.duration
+                                                            )} seconds ----------- \n\n` +
                                                             Object.values(
                                                                 result.stderrs
                                                             ).join("\n"),
@@ -1003,7 +1032,8 @@ namespace HttpServer {
                                             $set: {
                                                 status: "error",
                                                 setupLogs: {
-                                                    stdout: "",
+                                                    stdout: (error as Error)
+                                                        .message,
                                                     stderr: (error as Error)
                                                         .message,
                                                 },
@@ -1415,7 +1445,10 @@ namespace HttpServer {
                             serverObject.username,
                             serverObject.password,
                             [command],
-                            30_000
+                            30_000,
+                            {
+                                sshPrivateKey: serverObject.sshPrivateKey,
+                            }
                         )
                             .then(async (result) => {
                                 commandsExecuted++;
@@ -1478,6 +1511,68 @@ namespace HttpServer {
                 }
             }
         );
+
+        app.post(
+            "/set-ssh-key",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let sshPrivateKey = req.body.sshPrivateKey as string;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (!sshPrivateKey) {
+                        res.status(400).json({
+                            error: "No SSH private key provided",
+                        });
+                        return;
+                    }
+
+                    await Mongodb.getUsersCollection().updateOne(
+                        { username: operator },
+                        { $set: { currentsshPrivateKey: sshPrivateKey } }
+                    );
+
+                    res.json({
+                        message: "SSH private key updated successfully",
+                    });
+                } catch (error) {
+                    logger.error(
+                        `Error setting SSH private key: ${
+                            (error as Error).message
+                        }`
+                    );
+                    res.status(500).json({
+                        error: "Failed to set SSH private key " + error,
+                    });
+                }
+            }
+        );
+
+        app.get("/my-info", MiddleWare.authenticateToken, async (req, res) => {
+            try {
+                let operator = req.user?.username;
+                if (!operator) {
+                    res.status(400).json({ error: "No operator found" });
+                    return;
+                }
+
+                let userDoc = await Mongodb.getUsersCollection().findOne(
+                    { username: operator },
+                    { projection: { _id: 0, passwordHash: 0 } }
+                );
+                res.json({ user: userDoc });
+            } catch (error) {
+                logger.error(
+                    `Error fetching my info: ${(error as Error).message}`
+                );
+                res.status(500).json({
+                    error: "Failed to fetch user info " + error,
+                });
+            }
+        });
 
         let server = app.listen(port, () => {
             logger.info(`HTTP Server is running at http://localhost:${port}`);

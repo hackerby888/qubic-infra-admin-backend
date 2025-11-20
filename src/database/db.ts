@@ -3,7 +3,7 @@ import { logger } from "../utils/logger.js";
 import type { IpInfo } from "../utils/ip.js";
 
 const uri = process.env.MONGO_URI || "mongodb://localhost:27017";
-const dbName = process.env.MONGO_DB || "qubic_nodes";
+const dbName = process.env.MONGO_DB_NAME || "qubic_nodes";
 
 let client: MongoClient;
 let db: Db;

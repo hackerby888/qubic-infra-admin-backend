@@ -3,7 +3,6 @@ import { GithubService } from "./services/github-service.js";
 import { HttpServer } from "./http/http-server.js";
 import { NodeService } from "./services/node-service.js";
 import { Mongodb } from "./database/db.js";
-import { SSHService } from "./services/ssh-service.js";
 import { SocketServer } from "./http/socket-server.js";
 
 function checkEnvVariables() {
@@ -14,6 +13,9 @@ function checkEnvVariables() {
         "GITHUB_BOB_NODE_REPO",
         "GITHUB_TOKEN",
         "JWT_SECRET",
+        "PORT",
+        "MONGO_URI",
+        "MONGO_DB_NAME",
     ];
 
     requiredVars.forEach((varName) => {

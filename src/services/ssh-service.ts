@@ -131,7 +131,7 @@ export namespace SSHService {
                     `cd ~`,
                     `cd qbob`,
                     `CURRENT_BINARY=$(cat binary_name.txt)`,
-                    `screen -dmS keydb bash -lc "keydb-server --maxmemory ${totalRamNeededForKeydbInGB}G --maxmemory-policy allkeys-lru"`,
+                    `screen -dmS keydb bash -lc "keydb-server --save "" --maxmemory ${totalRamNeededForKeydbInGB}G --maxmemory-policy allkeys-lru"`,
                     `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
                     `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`,
                 ];
@@ -164,7 +164,7 @@ export namespace SSHService {
                 `jq . bob_config.json > temp_config.json && mv temp_config.json bob_config.json`,
                 `echo "${binaryName}" > binary_name.txt`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
-                `screen -dmS keydb bash -lc "keydb-server --maxmemory ${totalRamNeededForKeydbInGB}G --maxmemory-policy allkeys-lru"`,
+                `screen -dmS keydb bash -lc "keydb-server --save "" --maxmemory ${totalRamNeededForKeydbInGB}G --maxmemory-policy allkeys-lru"`,
                 `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
                 `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`,
             ];

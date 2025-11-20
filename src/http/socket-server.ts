@@ -62,6 +62,7 @@ export namespace SocketServer {
                             [`screen -r ${screenNameMap[data.service]} -d`],
                             0,
                             {
+                                sshPrivateKey: serverDoc.sshPrivateKey,
                                 onData: (logData: string) => {
                                     socket.emit("serviceLogUpdate", {
                                         service: data.service,
@@ -69,7 +70,23 @@ export namespace SocketServer {
                                     });
                                 },
                             }
-                        );
+                        )
+                            .then((result) => {
+                                if (!result.isSuccess) {
+                                    socket.emit("serviceLogUpdate", {
+                                        service: data.service,
+                                        log: `Error executing SSH commands: ${Object.values(
+                                            result.stderrs
+                                        ).join("\n")}\n`,
+                                    });
+                                }
+                            })
+                            .catch((error) => {
+                                socket.emit("serviceLogUpdate", {
+                                    service: data.service,
+                                    log: `Error executing SSH commands: ${error.message}\n`,
+                                });
+                            });
                         logger.info(
                             `Socket ${socket.id} subscribed to logs for service: ${data.service}`
                         );

@@ -177,18 +177,18 @@ export namespace SSHService {
             if (type === MongoDbTypes.ServiceType.LiteNode) {
                 return [
                     `for s in $(screen -ls | awk '/${LITE_SCREEN_NAME}/ {print $1}'); do screen -S "$s" -X quit; done`,
-                    `cd ~ && cd qlite && LITE_BINARY_NAME=$(cat binary_name.txt) && while pgrep -x $LITE_BINARY_NAME >/dev/null; do sleep 1; done`,
+                    `[ -d ~/qlite ] && [ -f ~/qlite/binary_name.txt ] && cd ~ && cd qlite && LITE_BINARY_NAME=$(cat binary_name.txt) && while pgrep -x $LITE_BINARY_NAME >/dev/null; do { echo "Waiting for litenode to be shutdown..."; sleep 1; }; done`,
                     `echo "Debug: LITE_BINARY_NAME=$LITE_BINARY_NAME"`,
                 ];
             } else if (type === MongoDbTypes.ServiceType.BobNode) {
                 let killDbCommands = [
-                    `pkill keydb-server || true`,
+                    `pkill -9 keydb-server || true`,
                     `for s in $(screen -ls | awk '/keydb/ {print $1}'); do screen -S "$s" -X quit || true; done`,
-                    `while pgrep -x keydb-server >/dev/null; do sleep 1; done`,
+                    `while pgrep -x keydb-server >/dev/null; do { echo "Waiting for keydb to be shutdown..."; sleep 1; }; done`,
                 ];
                 return [
                     `for s in $(screen -ls | awk '/${BOB_SCREEN_NAME}/ {print $1}'); do screen -S "$s" -X quit || true; done`,
-                    `cd ~ && cd qbob && BOB_BINARY_NAME=$(cat binary_name.txt) && while pgrep -x $BOB_BINARY_NAME >/dev/null; do sleep 1; done`,
+                    `[ -d ~/qbob ] && [ -f ~/qbob/binary_name.txt ] && cd ~ && cd qbob && BOB_BINARY_NAME=$(cat binary_name.txt) && while pgrep -x $BOB_BINARY_NAME >/dev/null; do { echo "Waiting for bobnode to be shutdown..."; sleep 1; }; done`,
                     ...(killDb ? killDbCommands : []),
                     `echo "Debug: BOB_BINARY_NAME=$BOB_BINARY_NAME"`,
                 ];
@@ -408,7 +408,12 @@ export namespace SSHService {
             systemRamInGB: number;
         }
     ) {
-        const returnFailedObject = {
+        const returnFailedObject: {
+            stdouts: { [key: string]: string };
+            stderrs: { [key: string]: string };
+            isSuccess: boolean;
+            duration: number;
+        } = {
             stdouts: {},
             stderrs: {},
             isSuccess: false,
@@ -447,20 +452,6 @@ export namespace SSHService {
             });
 
             if (!currentServer) {
-                return returnFailedObject;
-            }
-
-            if (
-                currentServer.deployStatus?.liteNode === "setting_up" &&
-                type === MongoDbTypes.ServiceType.LiteNode
-            ) {
-                return returnFailedObject;
-            }
-
-            if (
-                currentServer.deployStatus?.bobNode === "setting_up" &&
-                type === MongoDbTypes.ServiceType.BobNode
-            ) {
                 return returnFailedObject;
             }
 

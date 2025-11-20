@@ -1,4 +1,5 @@
 import { Mongodb, type MongoDbTypes } from "../database/db.js";
+import type { IpInfo } from "../utils/ip.js";
 import { logger } from "../utils/logger.js";
 import { sleep } from "../utils/time.js";
 
@@ -9,6 +10,7 @@ namespace NodeService {
 
     export interface LiteNodeTickInfo {
         operator: string;
+        ipInfo: IpInfo | {};
         tick: number;
         epoch: number;
         alignedVotes: number;
@@ -21,6 +23,7 @@ namespace NodeService {
 
     export interface BobNodeTickInfo {
         operator: string;
+        ipInfo: IpInfo | {};
         currentProcessingEpoch: number;
         currentFetchingTick: number;
         currentFetchingLogTick: number;
@@ -32,8 +35,17 @@ namespace NodeService {
         isPrivate?: boolean;
     }
 
-    let _currentLiteNodes: MongoDbTypes.LiteNode[] = [];
-    let _currentBobNodes: MongoDbTypes.BobNode[] = [];
+    interface LiteNodeExtended extends MongoDbTypes.LiteNode {
+        ipInfo?: IpInfo;
+    }
+
+    interface BobNodeExtended extends MongoDbTypes.BobNode {
+        ipInfo?: IpInfo;
+    }
+
+    let _ipInfoCache: { [ip: string]: IpInfo } = {};
+    let _currentLiteNodes: LiteNodeExtended[] = [];
+    let _currentBobNodes: BobNodeExtended[] = [];
 
     let _status: {
         liteServers: {
@@ -162,6 +174,9 @@ namespace NodeService {
                     let operator = servers[index]?.operator || "unknown";
                     _status.liteServers[servers[index]?.server as string] = {
                         operator: operator,
+                        ipInfo:
+                            _ipInfoCache[servers[index]?.server as string] ||
+                            {},
                         tick: tickInfo.tick,
                         initialTick: tickInfo.initialTick,
                         epoch: tickInfo.epoch,
@@ -212,6 +227,9 @@ namespace NodeService {
                     let operator = servers[index]?.operator || "unknown";
                     _status.bobServers[servers[index]?.server as string] = {
                         operator: operator,
+                        ipInfo:
+                            _ipInfoCache[servers[index]?.server as string] ||
+                            {},
                         currentProcessingEpoch: tickInfo.currentProcessingEpoch,
                         currentFetchingTick: tickInfo.currentFetchingTick,
                         currentFetchingLogTick: tickInfo.currentFetchingLogTick,
@@ -280,6 +298,26 @@ namespace NodeService {
         try {
             let liteServers = await Mongodb.getLiteNodes();
             let bobServers = await Mongodb.getBobNodes();
+
+            for (let node of [...liteServers, ...bobServers]) {
+                if (!_ipInfoCache[node.server]) {
+                    try {
+                        let fullServerDoc =
+                            await Mongodb.getServersCollection().findOne({
+                                server: node.server,
+                            });
+                        if (fullServerDoc && fullServerDoc.ipInfo) {
+                            _ipInfoCache[node.server] = fullServerDoc.ipInfo;
+                        }
+                    } catch (error) {
+                        logger.error(
+                            `Error fetching IP info for Lite Node ${
+                                node.server
+                            }: ${(error as Error).message}`
+                        );
+                    }
+                }
+            }
 
             _currentLiteNodes = liteServers.map((node) => ({ ...node }));
             _currentBobNodes = bobServers.map((node) => ({ ...node }));

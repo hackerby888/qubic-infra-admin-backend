@@ -1330,6 +1330,9 @@ namespace HttpServer {
                         "f8/savesnapshot:lite": [
                             `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[19~'`,
                         ],
+                        "f10/clearmemory:lite": [
+                            `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[21~'`,
+                        ],
                     };
 
                     let operator = req.user?.username;

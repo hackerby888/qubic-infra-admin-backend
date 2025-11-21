@@ -131,7 +131,14 @@ namespace GithubService {
         service: MongoDbTypes.ServiceType
     ): Promise<GithubTag[]> {
         if (isPullingTags) {
-            logger.info("Already pulling tags from GitHub. Skipping...");
+            await new Promise((resolve) => {
+                const checkInterval = setInterval(() => {
+                    if (!isPullingTags) {
+                        clearInterval(checkInterval);
+                        resolve(true);
+                    }
+                }, 50);
+            });
             return _tags[service] || [];
         }
         isPullingTags = true;

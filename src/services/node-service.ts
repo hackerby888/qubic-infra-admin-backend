@@ -321,9 +321,9 @@ namespace NodeService {
 
             _currentLiteNodes = liteServers.map((node) => ({ ...node }));
             _currentBobNodes = bobServers.map((node) => ({ ...node }));
-            console.log("✅ Pulled server lists from database");
-            console.log(_currentLiteNodes);
-            console.log(_currentBobNodes);
+            logger.info(
+                `Pulled ${liteServers.length} Lite Nodes and ${bobServers.length} Bob Nodes from database`
+            );
         } catch (error) {}
     }
 

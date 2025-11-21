@@ -239,7 +239,7 @@ namespace HttpServer {
                 await Mongodb.getCommandLogsCollection().insertOne({
                     operator: operator,
                     servers: servers,
-                    command: `${command} ` + services.join(", "),
+                    command: `${command}:${services.join(", ").toLowerCase()}`,
                     stdout: "",
                     stderr: "",
                     timestamp: Date.now(),
@@ -1323,6 +1323,15 @@ namespace HttpServer {
             MiddleWare.authenticateToken,
             async (req, res) => {
                 try {
+                    const QUICKS_COMMANDS_MAP = {
+                        "esc/shutdown:lite": [
+                            `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b'`,
+                        ],
+                        "f8/savesnapshot:lite": [
+                            `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[19~'`,
+                        ],
+                    };
+
                     let operator = req.user?.username;
                     let command = req.body.command as string;
                     let servers = req.body.servers as string[];
@@ -1444,13 +1453,22 @@ namespace HttpServer {
                             });
                     };
 
+                    let commandsToBeExecuted: string[] = [];
+                    if (command in QUICKS_COMMANDS_MAP) {
+                        commandsToBeExecuted =
+                            QUICKS_COMMANDS_MAP[
+                                command as keyof typeof QUICKS_COMMANDS_MAP
+                            ];
+                    } else {
+                        commandsToBeExecuted = [command];
+                    }
                     let commandsExecuted = 0;
                     for (let serverObject of serverDocs) {
                         SSHService.executeCommands(
                             serverObject.server,
                             serverObject.username,
                             serverObject.password,
-                            [command],
+                            commandsToBeExecuted,
                             30_000,
                             {
                                 sshPrivateKey: serverObject.sshPrivateKey,

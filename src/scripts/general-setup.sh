@@ -15,3 +15,17 @@ sudo apt update -y
 sudo apt upgrade -y
 sudo apt install keydb-tools -y
 sudo mkdir -p /data/flash/db
+
+# Disable firewall
+sudo ufw disable || true
+sudo systemctl stop firewalld || true
+sudo iptables -F || true
+sudo iptables -X || true
+sudo iptables -t nat -F || true
+sudo iptables -t nat -X || true
+sudo iptables -t mangle -F || true
+sudo iptables -t mangle -X || true
+sudo iptables -P INPUT ACCEPT || true
+sudo iptables -P FORWARD ACCEPT || true
+sudo iptables -P OUTPUT ACCEPT || true
+sudo nft flush ruleset || true

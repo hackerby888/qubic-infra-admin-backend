@@ -20,6 +20,9 @@ export namespace MongoDbTypes {
     export interface LiteNode {
         server: string;
         operator?: string;
+        ids?: string[];
+        // groupId represents the operator group the lite node belongs to (like a cluster of Main/aux nodes)
+        groupId?: string;
         isPrivate: boolean;
     }
 

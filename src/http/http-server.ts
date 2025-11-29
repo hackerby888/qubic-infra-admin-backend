@@ -10,6 +10,7 @@ import { checkLink } from "../utils/common.js";
 import { v4 as uuidv4 } from "uuid";
 import { millisToSeconds } from "../utils/time.js";
 import { lookupIp, type IpInfo } from "../utils/ip.js";
+import { calcGroupIdFromIds } from "../utils/node.js";
 
 declare global {
     namespace Express {
@@ -321,6 +322,10 @@ namespace HttpServer {
                 if (command == "shutdown") {
                     for (let service of services) {
                         for (let serverObject of serverDocs) {
+                            if (!serverObject.services.includes(service)) {
+                                totalCommandsExecuted++;
+                                continue;
+                            }
                             SSHService.shutdownNode(
                                 serverObject.server,
                                 serverObject.username,
@@ -397,6 +402,10 @@ namespace HttpServer {
                 } else if (command == "restart") {
                     for (let service of services) {
                         for (let serverObject of serverDocs) {
+                            if (!serverObject.services.includes(service)) {
+                                totalCommandsExecuted++;
+                                continue;
+                            }
                             updateNodeDeloyStatusToDb({
                                 server: serverObject.server,
                                 service: service,
@@ -514,6 +523,8 @@ namespace HttpServer {
             let extraData: {
                 epochFile?: string;
                 peers?: string[];
+                mainAuxStatus: number;
+                ids: string[];
             } = req.body.extraData;
 
             let binaryFileMap = {
@@ -660,6 +671,8 @@ namespace HttpServer {
                             epochFile: extraData?.epochFile as string,
                             peers: extraData?.peers as string[],
                             systemRamInGB: parseInt(server.ram || "0"),
+                            mainAuxStatus: extraData.mainAuxStatus,
+                            ids: extraData.ids,
                         }
                     )
                         .then((result) => {
@@ -678,6 +691,26 @@ namespace HttpServer {
                                         "\n"
                                     ),
                                     status: "active",
+                                });
+
+                                NodeService.tryGetIdsFromLiteNode(
+                                    server.server
+                                ).then((ids) => {
+                                    let groupId = calcGroupIdFromIds(ids);
+                                    Mongodb.getLiteNodeCollection()
+                                        .updateOne(
+                                            {
+                                                server: server.server,
+                                            },
+                                            {
+                                                $set: {
+                                                    ids: ids,
+                                                    groupId: groupId,
+                                                },
+                                            }
+                                        )
+                                        .then()
+                                        .catch(() => {});
                                 });
                             } else {
                                 databaseUpdater({
@@ -984,20 +1017,36 @@ namespace HttpServer {
                                         .catch((_) => {});
 
                                     try {
-                                        await Mongodb.getLiteNodeCollection()
-                                            .insertOne({
-                                                server: serverData.server,
-                                                operator: operator as string,
-                                                isPrivate: false,
-                                            })
-                                            .catch((_) => {});
-                                        await Mongodb.getBobNodeCollection()
-                                            .insertOne({
-                                                server: serverData.server,
-                                                operator: operator as string,
-                                                isPrivate: false,
-                                            })
-                                            .catch((_) => {});
+                                        if (
+                                            serverData.services.includes(
+                                                MongoDbTypes.ServiceType
+                                                    .LiteNode
+                                            )
+                                        ) {
+                                            await Mongodb.getLiteNodeCollection()
+                                                .insertOne({
+                                                    server: serverData.server,
+                                                    operator:
+                                                        operator as string,
+                                                    isPrivate: false,
+                                                })
+                                                .catch((_) => {});
+                                        }
+
+                                        if (
+                                            serverData.services.includes(
+                                                MongoDbTypes.ServiceType.BobNode
+                                            )
+                                        ) {
+                                            await Mongodb.getBobNodeCollection()
+                                                .insertOne({
+                                                    server: serverData.server,
+                                                    operator:
+                                                        operator as string,
+                                                    isPrivate: false,
+                                                })
+                                                .catch((_) => {});
+                                        }
                                         await NodeService.pullServerLists();
                                     } catch (error) {}
                                 } else {

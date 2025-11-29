@@ -59,12 +59,17 @@ export namespace SSHService {
             epochFile,
             peers,
             isRestart = false,
+            mainAuxStatus,
+            ids,
         }: {
             binaryUrl: string;
             epochFile: string;
             peers: string[];
             isRestart?: boolean;
+            mainAuxStatus?: number;
+            ids?: string[];
         }) {
+            const FINAL_START_COMMAND = `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS $SEEDS_ARG --node-mode $MAIN_AUX_STATUS || exec bash"`;
             // If isRestart is true, skip setup steps and just start the node with existing configs
             if (isRestart) {
                 return [
@@ -72,12 +77,16 @@ export namespace SSHService {
                     `cd qlite`,
                     `CURRENT_PEERS=$(cat peers.txt)`,
                     `CURRENT_BINARY=$(cat binary_name.txt)`,
-                    `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS"`,
+                    `IDS=$(cat ids.txt)`,
+                    `MAIN_AUX_STATUS=$(cat main_aux_status.txt)`,
+                    `SEEDS_ARG="\${IDS:+--seeds $IDS}"`,
+                    FINAL_START_COMMAND,
                 ];
             }
 
             let peersString = peers.join(",");
             let binaryName = getBasenameFromUrl(binaryUrl);
+            let idsInString = ids && ids.length > 0 ? ids.join(",") : "";
             return [
                 `date`,
                 `cd ~`,
@@ -91,9 +100,14 @@ export namespace SSHService {
                 // Save peers and binary name for future restarts
                 `echo "${peersString}" > peers.txt`,
                 `echo "${binaryName}" > binary_name.txt`,
+                `echo "${idsInString}" > ids.txt`,
+                `echo "${mainAuxStatus || 0}" > main_aux_status.txt`,
                 `CURRENT_PEERS=$(cat peers.txt)`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
-                `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS"`,
+                `IDS=$(cat ids.txt)`,
+                `MAIN_AUX_STATUS=$(cat main_aux_status.txt)`,
+                `SEEDS_ARG="\${IDS:+--seeds $IDS}"`,
+                FINAL_START_COMMAND,
             ];
         },
 
@@ -110,6 +124,7 @@ export namespace SSHService {
             isRestart?: boolean;
             systemRamInGB: number;
         }) {
+            const FINAL_START_COMMAND = `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`;
             const totalRamNeededInSystem = {
                 liteNode: 40,
                 bobNode: 6,
@@ -133,7 +148,7 @@ export namespace SSHService {
                     `CURRENT_BINARY=$(cat binary_name.txt)`,
                     `screen -dmS keydb bash -lc "keydb-server --save "" --maxmemory ${totalRamNeededForKeydbInGB}G --maxmemory-policy allkeys-lru"`,
                     `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
-                    `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`,
+                    FINAL_START_COMMAND,
                 ];
             }
 
@@ -166,7 +181,7 @@ export namespace SSHService {
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
                 `screen -dmS keydb bash -lc "keydb-server --save "" --maxmemory ${totalRamNeededForKeydbInGB}G --maxmemory-policy allkeys-lru"`,
                 `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
-                `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`,
+                FINAL_START_COMMAND,
             ];
         },
 
@@ -401,11 +416,15 @@ export namespace SSHService {
             epochFile,
             peers,
             systemRamInGB,
+            mainAuxStatus,
+            ids,
         }: {
             binaryUrl: string;
             epochFile: string;
             peers: string[];
             systemRamInGB: number;
+            mainAuxStatus: number;
+            ids: string[];
         }
     ) {
         const returnFailedObject: {
@@ -432,6 +451,8 @@ export namespace SSHService {
                         binaryUrl,
                         epochFile,
                         peers,
+                        mainAuxStatus,
+                        ids,
                     })
                 );
             } else if (type === MongoDbTypes.ServiceType.BobNode) {

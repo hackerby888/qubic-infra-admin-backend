@@ -18,6 +18,8 @@ namespace NodeService {
         initialTick: number;
         lastUpdated: number;
         lastTickChanged: number;
+        mainAuxStatus: number;
+        groupId: string;
         isPrivate?: boolean;
     }
 
@@ -84,7 +86,9 @@ namespace NodeService {
                 misalignedVotes: -1,
                 initialTick: -1,
                 lastUpdated: -1,
+                mainAuxStatus: -1,
                 lastTickChanged: -1,
+                groupId: "",
             };
         }
     }
@@ -146,6 +150,36 @@ namespace NodeService {
         return statuses;
     }
 
+    export async function tryGetIdsFromLiteNode(
+        server: string
+    ): Promise<string[]> {
+        const url = `http://${server}:${DEFAULT_LITE_NODE_HTTP_PORT}/running-ids`;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10_000);
+        let retries = 1000;
+        while (retries > 0) {
+            try {
+                const response = await fetch(url, {
+                    signal: controller.signal,
+                });
+                clearTimeout(timeout);
+                if (!response.ok) {
+                    throw new Error(
+                        `Failed to fetch running IDs from ${server}: ${response.statusText}`
+                    );
+                }
+
+                const data: { runningIds: string[] } = await response.json();
+
+                return data.runningIds;
+            } catch (error) {
+                retries--;
+            }
+        }
+
+        return [];
+    }
+
     async function watchLiteNodes() {
         while (true) {
             let servers: MongoDbTypes.LiteNode[] = [..._currentLiteNodes];
@@ -182,6 +216,8 @@ namespace NodeService {
                         epoch: tickInfo.epoch,
                         alignedVotes: tickInfo.alignedVotes,
                         misalignedVotes: tickInfo.misalignedVotes,
+                        mainAuxStatus: tickInfo.mainAuxStatus,
+                        groupId: servers[index]?.groupId || "",
                         lastUpdated:
                             tickInfo.tick !== -1
                                 ? Date.now()

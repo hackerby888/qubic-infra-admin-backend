@@ -19,21 +19,19 @@ export namespace SSHService {
         "p2p-node": [],
         // Format: BM:ip:port:0-0-0-0 where 0-0-0-0 is the passcode
         "trusted-node": [],
-        "request-cycle-ms": 500,
-        "request-logging-cycle-ms": 150,
-        "future-offset": 3,
+        "request-cycle-ms": 200,
+        "request-logging-cycle-ms": 10,
+        "future-offset": 16,
         "log-level": "info",
         "keydb-url": "tcp://127.0.0.1:6379",
         "run-server": true,
         "server-port": 21842,
         "arbitrator-identity":
             "AFZPUAIYVPNUYGJRQVLUKOPPVLHAZQTGLYAAUUNBXFTVTAMSBKQBLEIEPCVJ",
-        "trusted-entities": [
-            "QCTBOBEPDEZGBBCSOWGBYCAIZESDMEVRGLWVNBZAPBIZYEJFFZSPPIVGSCVL",
-        ],
-        "node-seed": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "is-trusted-node": true,
-        "tick-storage-mode": "free",
+        "tick-storage-mode": "kvrocks",
+        "kvrocks-url": "tcp://127.0.0.1:6666",
+        "tx-storage-mode": "kvrocks",
+        tx_tick_to_live: 100000,
         "max-thread": 16,
         "spam-qu-threshold": 100,
     };
@@ -59,12 +57,17 @@ export namespace SSHService {
             epochFile,
             peers,
             isRestart = false,
+            mainAuxStatus,
+            ids,
         }: {
             binaryUrl: string;
             epochFile: string;
             peers: string[];
             isRestart?: boolean;
+            mainAuxStatus?: number;
+            ids?: string[];
         }) {
+            const FINAL_START_COMMAND = `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS $SEEDS_ARG --node-mode $MAIN_AUX_STATUS || exec bash"`;
             // If isRestart is true, skip setup steps and just start the node with existing configs
             if (isRestart) {
                 return [
@@ -72,12 +75,16 @@ export namespace SSHService {
                     `cd qlite`,
                     `CURRENT_PEERS=$(cat peers.txt)`,
                     `CURRENT_BINARY=$(cat binary_name.txt)`,
-                    `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS"`,
+                    `IDS=$(cat ids.txt)`,
+                    `MAIN_AUX_STATUS=$(cat main_aux_status.txt)`,
+                    `SEEDS_ARG="\${IDS:+--seeds $IDS}"`,
+                    FINAL_START_COMMAND,
                 ];
             }
 
             let peersString = peers.join(",");
             let binaryName = getBasenameFromUrl(binaryUrl);
+            let idsInString = ids && ids.length > 0 ? ids.join(",") : "";
             return [
                 `date`,
                 `cd ~`,
@@ -91,9 +98,14 @@ export namespace SSHService {
                 // Save peers and binary name for future restarts
                 `echo "${peersString}" > peers.txt`,
                 `echo "${binaryName}" > binary_name.txt`,
+                `echo "${idsInString}" > ids.txt`,
+                `echo "${mainAuxStatus || 0}" > main_aux_status.txt`,
                 `CURRENT_PEERS=$(cat peers.txt)`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
-                `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS"`,
+                `IDS=$(cat ids.txt)`,
+                `MAIN_AUX_STATUS=$(cat main_aux_status.txt)`,
+                `SEEDS_ARG="\${IDS:+--seeds $IDS}"`,
+                FINAL_START_COMMAND,
             ];
         },
 
@@ -110,6 +122,7 @@ export namespace SSHService {
             isRestart?: boolean;
             systemRamInGB: number;
         }) {
+            const FINAL_START_COMMAND = `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`;
             const totalRamNeededInSystem = {
                 liteNode: 40,
                 bobNode: 6,
@@ -131,9 +144,7 @@ export namespace SSHService {
                     `cd ~`,
                     `cd qbob`,
                     `CURRENT_BINARY=$(cat binary_name.txt)`,
-                    `screen -dmS keydb bash -lc "keydb-server --save "" --maxmemory ${totalRamNeededForKeydbInGB}G --maxmemory-policy allkeys-lru"`,
-                    `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
-                    `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`,
+                    FINAL_START_COMMAND,
                 ];
             }
 
@@ -152,6 +163,8 @@ export namespace SSHService {
                 `rm -rf qbob`,
                 `rm -rf /data/flash/db/*`,
                 `mkdir -p /data/flash/db`,
+                `rm -rf /kvrocksDB/*`,
+                `mkdir -p /kvrocksDB/`,
                 `mkdir -p qbob`,
                 `cd qbob`,
                 `wget ${binaryUrl}`,
@@ -164,9 +177,11 @@ export namespace SSHService {
                 `jq . bob_config.json > temp_config.json && mv temp_config.json bob_config.json`,
                 `echo "${binaryName}" > binary_name.txt`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
-                `screen -dmS keydb bash -lc "keydb-server --save "" --maxmemory ${totalRamNeededForKeydbInGB}G --maxmemory-policy allkeys-lru"`,
+                `screen -dmS keydb bash -lc "keydb-server /etc/keydb.conf || exec bash"`,
+                `screen -dmS kvrocks bash -lc "kvrocks -c /etc/kvrocks.conf || exec bash"`,
                 `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
-                `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`,
+                `until [[ "$(keydb-cli -h 127.0.0.1 -p 6666 ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for kvrocks..."; sleep 1; }; done`,
+                FINAL_START_COMMAND,
             ];
         },
 
@@ -183,8 +198,11 @@ export namespace SSHService {
             } else if (type === MongoDbTypes.ServiceType.BobNode) {
                 let killDbCommands = [
                     `pkill -9 keydb-server || true`,
+                    `pkill -9 kvrocks || true`,
                     `for s in $(screen -ls | awk '/keydb/ {print $1}'); do screen -S "$s" -X quit || true; done`,
+                    `for s in $(screen -ls | awk '/kvrocks/ {print $1}'); do screen -S "$s" -X quit || true; done`,
                     `while pgrep -x keydb-server >/dev/null; do { echo "Waiting for keydb to be shutdown..."; sleep 1; }; done`,
+                    `while pgrep -x kvrocks >/dev/null; do { echo "Waiting for kvrocks to be shutdown..."; sleep 1; }; done`,
                 ];
                 return [
                     `for s in $(screen -ls | awk '/${BOB_SCREEN_NAME}/ {print $1}'); do screen -S "$s" -X quit || true; done`,
@@ -232,6 +250,23 @@ export namespace SSHService {
                 return [];
             }
         },
+    };
+
+    const SetupFilesPath = {
+        kvrocksConfig: path.resolve(
+            process.cwd(),
+            "src",
+            "scripts",
+            "bob",
+            "kvrocks.conf"
+        ),
+        keydbConfig: path.resolve(
+            process.cwd(),
+            "src",
+            "scripts",
+            "bob",
+            "keydb.conf"
+        ),
     };
 
     const systemInfoCommands = {
@@ -297,6 +332,48 @@ export namespace SSHService {
                 isNonInteractive: true,
             }
         );
+
+        for (const file of Object.values(SetupFilesPath)) {
+            try {
+                let transferFileResult = await transferFile(
+                    host,
+                    username,
+                    password,
+                    file,
+                    `/etc/${path.basename(file)}`,
+                    sshPrivateKey
+                );
+
+                if (!transferFileResult.isSuccess) {
+                    return {
+                        stdouts: result.stdouts,
+                        stderrs: {
+                            ...result.stderrs,
+                            transfer: transferFileResult.errorMessage || "",
+                        },
+                        isSuccess: false,
+                        cpu: "",
+                        os: "",
+                        ram: "",
+                        duration: result.duration,
+                    };
+                }
+            } catch (error) {
+                return {
+                    stdouts: result.stdouts,
+                    stderrs: {
+                        ...result.stderrs,
+                        transfer: (error as Error).message,
+                    },
+                    isSuccess: false,
+                    cpu: "",
+                    os: "",
+                    ram: "",
+                    duration: result.duration,
+                };
+            }
+        }
+
         // To be able to map the outputs correctly, execute system info commands separately aka (isNonInteractive: true)
         let sysInfo = await executeCommands(
             host,
@@ -401,11 +478,15 @@ export namespace SSHService {
             epochFile,
             peers,
             systemRamInGB,
+            mainAuxStatus,
+            ids,
         }: {
             binaryUrl: string;
             epochFile: string;
             peers: string[];
             systemRamInGB: number;
+            mainAuxStatus: number;
+            ids: string[];
         }
     ) {
         const returnFailedObject: {
@@ -432,6 +513,8 @@ export namespace SSHService {
                         binaryUrl,
                         epochFile,
                         peers,
+                        mainAuxStatus,
+                        ids,
                     })
                 );
             } else if (type === MongoDbTypes.ServiceType.BobNode) {
@@ -718,6 +801,56 @@ export namespace SSHService {
         let durationInMillis = endTime - startTime;
         delete cleanUpSSHMap[host];
         return { stdouts, stderrs, isSuccess, duration: durationInMillis };
+    }
+
+    export async function transferFile(
+        host: string,
+        username: string,
+        password: string,
+        localFilePath: string,
+        remoteFilePath: string,
+        sshPrivateKey: string
+    ) {
+        return new Promise<{ isSuccess: boolean; errorMessage?: string }>(
+            (resolve) => {
+                const conn = new Client();
+                conn.on("ready", () => {
+                    conn.sftp((err, sftp) => {
+                        if (err) {
+                            resolve({
+                                isSuccess: false,
+                                errorMessage: err.message,
+                            });
+                            return;
+                        }
+                        sftp.fastPut(localFilePath, remoteFilePath, (err) => {
+                            if (err) {
+                                resolve({
+                                    isSuccess: false,
+                                    errorMessage: err.message,
+                                });
+                            } else {
+                                resolve({ isSuccess: true });
+                            }
+                            conn.end();
+                        });
+                    });
+                })
+                    .on("error", (err) => {
+                        resolve({
+                            isSuccess: false,
+                            errorMessage: err.message,
+                        });
+                    })
+                    .connect({
+                        host: host,
+                        port: 22,
+                        username: username,
+                        password: password,
+                        privateKey: sshPrivateKey.replace(/\\n/g, "\n"),
+                    });
+            }
+        );
     }
 
     export async function startRequestExecuteCommandsProcessor() {

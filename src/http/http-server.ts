@@ -1200,7 +1200,7 @@ namespace HttpServer {
             async (req, res) => {
                 try {
                     let operator = req.user?.username;
-                    let server = req.body.server as string;
+                    let servers = req.body.servers as string[];
                     if (!operator) {
                         res.status(400).json({ error: "No operator found" });
                         return;
@@ -1210,20 +1210,22 @@ namespace HttpServer {
                         return;
                     }
 
-                    await Mongodb.getServersCollection().deleteOne({
-                        server: server,
-                        operator: operator,
-                    });
+                    for (let server of servers) {
+                        await Mongodb.getServersCollection().deleteOne({
+                            server: server,
+                            operator: operator,
+                        });
 
-                    // Remove all lite/bob nodes associcate with it
-                    await Mongodb.getLiteNodeCollection().deleteOne({
-                        server: server,
-                        operator: operator,
-                    });
-                    await Mongodb.getBobNodeCollection().deleteOne({
-                        server: server,
-                        operator: operator,
-                    });
+                        // Remove all lite/bob nodes associcate with it
+                        await Mongodb.getLiteNodeCollection().deleteOne({
+                            server: server,
+                            operator: operator,
+                        });
+                        await Mongodb.getBobNodeCollection().deleteOne({
+                            server: server,
+                            operator: operator,
+                        });
+                    }
                     await NodeService.pullServerLists();
                     res.json({ message: "Server deleted successfully" });
                 } catch (error) {

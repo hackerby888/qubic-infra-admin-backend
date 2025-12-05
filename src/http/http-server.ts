@@ -609,6 +609,15 @@ namespace HttpServer {
                     });
                     return;
                 }
+
+                for (let server of serverDocs) {
+                    if (server.status !== "active") {
+                        res.status(400).json({
+                            error: `Server ${server.server} is not active, please exclude it from deployment.`,
+                        });
+                        return;
+                    }
+                }
             } catch (error) {
                 res.status(500).json({
                     error: "Failed to fetch servers from database " + error,

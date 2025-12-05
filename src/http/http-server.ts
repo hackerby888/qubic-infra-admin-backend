@@ -525,6 +525,7 @@ namespace HttpServer {
                 peers?: string[];
                 mainAuxStatus: number;
                 ids: string[];
+                ramMode: string;
             } = req.body.extraData;
 
             let binaryFileMap = {
@@ -673,6 +674,7 @@ namespace HttpServer {
                             systemRamInGB: parseInt(server.ram || "0"),
                             mainAuxStatus: extraData.mainAuxStatus,
                             ids: extraData.ids,
+                            ramMode: extraData.ramMode,
                         }
                     )
                         .then((result) => {
@@ -870,6 +872,35 @@ namespace HttpServer {
                             (error as Error).message,
                     });
                     return;
+                }
+            }
+        );
+
+        app.post(
+            "/set-server-alias",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let { server, alias } = req.body;
+                    let operator = req.user?.username;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    await Mongodb.getServersCollection().updateOne(
+                        { server: server, operator: operator },
+                        { $set: { alias: alias } }
+                    );
+                    res.json({ message: "Alias updated successfully" });
+                } catch (error) {
+                    logger.error(
+                        `Error setting server alias: ${
+                            (error as Error).message
+                        }`
+                    );
+                    res.status(500).json({
+                        error: "Internal server error" + error,
+                    });
                 }
             }
         );

@@ -661,6 +661,7 @@ namespace HttpServer {
             try {
                 for (let server of serverDocs) {
                     if (!server.services.includes(service)) continue;
+                    if (!server.username) continue;
                     SSHService.deployNode(
                         server.server,
                         server!.username,
@@ -919,7 +920,7 @@ namespace HttpServer {
                             bobNode: boolean;
                         };
                     }[];
-                    authType: "password" | "sshKey";
+                    authType: "password" | "sshKey" | "tracking";
                 } = req.body;
                 let { servers: serversData, authType } = body;
                 let operator = req.user?.username;
@@ -981,7 +982,10 @@ namespace HttpServer {
                             ].filter(
                                 (s) => s !== "null"
                             ) as MongoDbTypes.ServiceType[],
-                            status: "setting_up",
+                            status:
+                                authType === "tracking"
+                                    ? "active"
+                                    : "setting_up",
                         };
                     });
 
@@ -1010,77 +1014,109 @@ namespace HttpServer {
                         serversDataNormalized
                     );
 
-                    // Do set up for servers
-                    for (let serverData of serversDataNormalized) {
-                        SSHService.setupNode(
-                            serverData.server,
-                            serverData.username,
-                            serverData.password,
-                            serverData.sshPrivateKey
-                        )
-                            .then(async (result) => {
-                                if (result.isSuccess) {
-                                    Mongodb.getServersCollection()
-                                        .updateOne(
-                                            { server: serverData.server },
-                                            {
-                                                $set: {
-                                                    cpu: result.cpu,
-                                                    os: result.os,
-                                                    ram: result.ram,
-                                                    status: "active",
-                                                    setupLogs: {
-                                                        stdout:
-                                                            `---------- Time elapsed ${millisToSeconds(
-                                                                result.duration
-                                                            )} seconds ----------- \n\n` +
-                                                            Object.values(
-                                                                result.stdouts
+                    if (authType !== "tracking") {
+                        // Do set up for servers
+                        for (let serverData of serversDataNormalized) {
+                            SSHService.setupNode(
+                                serverData.server,
+                                serverData.username,
+                                serverData.password,
+                                serverData.sshPrivateKey
+                            )
+                                .then(async (result) => {
+                                    if (result.isSuccess) {
+                                        Mongodb.getServersCollection()
+                                            .updateOne(
+                                                { server: serverData.server },
+                                                {
+                                                    $set: {
+                                                        cpu: result.cpu,
+                                                        os: result.os,
+                                                        ram: result.ram,
+                                                        status: "active",
+                                                        setupLogs: {
+                                                            stdout:
+                                                                `---------- Time elapsed ${millisToSeconds(
+                                                                    result.duration
+                                                                )} seconds ----------- \n\n` +
+                                                                Object.values(
+                                                                    result.stdouts
+                                                                ).join("\n"),
+                                                            stderr: Object.values(
+                                                                result.stderrs
                                                             ).join("\n"),
-                                                        stderr: Object.values(
-                                                            result.stderrs
-                                                        ).join("\n"),
+                                                        },
                                                     },
-                                                },
+                                                }
+                                            )
+                                            .then()
+                                            .catch((_) => {});
+
+                                        try {
+                                            if (
+                                                serverData.services.includes(
+                                                    MongoDbTypes.ServiceType
+                                                        .LiteNode
+                                                )
+                                            ) {
+                                                await Mongodb.getLiteNodeCollection()
+                                                    .insertOne({
+                                                        server: serverData.server,
+                                                        operator:
+                                                            operator as string,
+                                                        isPrivate: false,
+                                                    })
+                                                    .catch((_) => {});
                                             }
-                                        )
-                                        .then()
-                                        .catch((_) => {});
 
-                                    try {
-                                        if (
-                                            serverData.services.includes(
-                                                MongoDbTypes.ServiceType
-                                                    .LiteNode
+                                            if (
+                                                serverData.services.includes(
+                                                    MongoDbTypes.ServiceType
+                                                        .BobNode
+                                                )
+                                            ) {
+                                                await Mongodb.getBobNodeCollection()
+                                                    .insertOne({
+                                                        server: serverData.server,
+                                                        operator:
+                                                            operator as string,
+                                                        isPrivate: false,
+                                                    })
+                                                    .catch((_) => {});
+                                            }
+                                            await NodeService.pullServerLists();
+                                        } catch (error) {}
+                                    } else {
+                                        Mongodb.getServersCollection()
+                                            .updateOne(
+                                                { server: serverData.server },
+                                                {
+                                                    $set: {
+                                                        status: "error",
+                                                        setupLogs: {
+                                                            stdout:
+                                                                `---------- Time elapsed ${millisToSeconds(
+                                                                    result.duration
+                                                                )} seconds ----------- \n\n` +
+                                                                Object.values(
+                                                                    result.stdouts
+                                                                ).join("\n"),
+                                                            stderr:
+                                                                `---------- Time elapsed ${millisToSeconds(
+                                                                    result.duration
+                                                                )} seconds ----------- \n\n` +
+                                                                Object.values(
+                                                                    result.stderrs
+                                                                ).join("\n"),
+                                                        },
+                                                    },
+                                                }
                                             )
-                                        ) {
-                                            await Mongodb.getLiteNodeCollection()
-                                                .insertOne({
-                                                    server: serverData.server,
-                                                    operator:
-                                                        operator as string,
-                                                    isPrivate: false,
-                                                })
-                                                .catch((_) => {});
-                                        }
-
-                                        if (
-                                            serverData.services.includes(
-                                                MongoDbTypes.ServiceType.BobNode
-                                            )
-                                        ) {
-                                            await Mongodb.getBobNodeCollection()
-                                                .insertOne({
-                                                    server: serverData.server,
-                                                    operator:
-                                                        operator as string,
-                                                    isPrivate: false,
-                                                })
-                                                .catch((_) => {});
-                                        }
-                                        await NodeService.pullServerLists();
-                                    } catch (error) {}
-                                } else {
+                                            .then()
+                                            .catch((_) => {});
+                                    }
+                                })
+                                .catch((error) => {
                                     Mongodb.getServersCollection()
                                         .updateOne(
                                             { server: serverData.server },
@@ -1088,47 +1124,51 @@ namespace HttpServer {
                                                 $set: {
                                                     status: "error",
                                                     setupLogs: {
-                                                        stdout:
-                                                            `---------- Time elapsed ${millisToSeconds(
-                                                                result.duration
-                                                            )} seconds ----------- \n\n` +
-                                                            Object.values(
-                                                                result.stdouts
-                                                            ).join("\n"),
-                                                        stderr:
-                                                            `---------- Time elapsed ${millisToSeconds(
-                                                                result.duration
-                                                            )} seconds ----------- \n\n` +
-                                                            Object.values(
-                                                                result.stderrs
-                                                            ).join("\n"),
+                                                        stdout: (error as Error)
+                                                            .message,
+                                                        stderr: (error as Error)
+                                                            .message,
                                                     },
                                                 },
                                             }
                                         )
                                         .then()
+                                        .catch(() => {});
+                                });
+                        }
+                    } else {
+                        for (let serverData of serversDataNormalized) {
+                            try {
+                                if (
+                                    serverData.services.includes(
+                                        MongoDbTypes.ServiceType.LiteNode
+                                    )
+                                ) {
+                                    await Mongodb.getLiteNodeCollection()
+                                        .insertOne({
+                                            server: serverData.server,
+                                            operator: operator as string,
+                                            isPrivate: false,
+                                        })
                                         .catch((_) => {});
                                 }
-                            })
-                            .catch((error) => {
-                                Mongodb.getServersCollection()
-                                    .updateOne(
-                                        { server: serverData.server },
-                                        {
-                                            $set: {
-                                                status: "error",
-                                                setupLogs: {
-                                                    stdout: (error as Error)
-                                                        .message,
-                                                    stderr: (error as Error)
-                                                        .message,
-                                                },
-                                            },
-                                        }
+
+                                if (
+                                    serverData.services.includes(
+                                        MongoDbTypes.ServiceType.BobNode
                                     )
-                                    .then()
-                                    .catch(() => {});
-                            });
+                                ) {
+                                    await Mongodb.getBobNodeCollection()
+                                        .insertOne({
+                                            server: serverData.server,
+                                            operator: operator as string,
+                                            isPrivate: false,
+                                        })
+                                        .catch((_) => {});
+                                }
+                                await NodeService.pullServerLists();
+                            } catch (error) {}
+                        }
                     }
                 } catch (error) {
                     logger.error(

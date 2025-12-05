@@ -115,17 +115,19 @@ export namespace SSHService {
             peers,
             isRestart = false,
             systemRamInGB,
+            ramMode,
         }: {
             binaryUrl: string;
             epochFile: string;
             peers: string[];
             isRestart?: boolean;
             systemRamInGB: number;
+            ramMode?: string;
         }) {
             const FINAL_START_COMMAND = `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`;
             const totalRamNeededInSystem = {
                 liteNode: 40,
-                bobNode: 6,
+                bobNode: 8,
                 system: 2,
             };
             let totalRamNeededForKeydbInGB =
@@ -157,6 +159,13 @@ export namespace SSHService {
                     .filter((p) => p && p.startsWith("BM:"))
                     .map((p) => p.trim()),
             };
+
+            let targetGbForKeyDb =
+                parseInt(ramMode || "16GB") - totalRamNeededInSystem.bobNode;
+            if (isNaN(targetGbForKeyDb) || targetGbForKeyDb < 4) {
+                targetGbForKeyDb = 4;
+            }
+
             return [
                 `date`,
                 `cd ~`,
@@ -177,7 +186,7 @@ export namespace SSHService {
                 `jq . bob_config.json > temp_config.json && mv temp_config.json bob_config.json`,
                 `echo "${binaryName}" > binary_name.txt`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
-                `screen -dmS keydb bash -lc "keydb-server /etc/keydb.conf || exec bash"`,
+                `screen -dmS keydb bash -lc "keydb-server /etc/keydb.conf --maxmemory ${targetGbForKeyDb}gb || exec bash"`,
                 `screen -dmS kvrocks bash -lc "kvrocks -c /etc/kvrocks.conf || exec bash"`,
                 `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
                 `until [[ "$(keydb-cli -h 127.0.0.1 -p 6666 ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for kvrocks..."; sleep 1; }; done`,
@@ -326,7 +335,7 @@ export namespace SSHService {
             username,
             password,
             [inlineBashCommands(commands)],
-            0,
+            1000 * 60 * 3, // 3 mins
             {
                 sshPrivateKey: sshPrivateKey,
                 isNonInteractive: true,
@@ -380,7 +389,7 @@ export namespace SSHService {
             username,
             password,
             Object.values(systemInfoCommands),
-            0,
+            1000 * 60 * 3, // 3 mins
             {
                 sshPrivateKey: sshPrivateKey,
                 isNonInteractive: true,
@@ -480,6 +489,7 @@ export namespace SSHService {
             systemRamInGB,
             mainAuxStatus,
             ids,
+            ramMode,
         }: {
             binaryUrl: string;
             epochFile: string;
@@ -487,6 +497,7 @@ export namespace SSHService {
             systemRamInGB: number;
             mainAuxStatus: number;
             ids: string[];
+            ramMode: string;
         }
     ) {
         const returnFailedObject: {
@@ -524,6 +535,7 @@ export namespace SSHService {
                         epochFile,
                         peers,
                         systemRamInGB,
+                        ramMode,
                     })
                 );
             } else {
@@ -559,7 +571,7 @@ export namespace SSHService {
                 username,
                 password,
                 commands,
-                0,
+                1000 * 60 * 3, // 3 mins
                 {
                     sshPrivateKey: sshPrivateKey,
                 }

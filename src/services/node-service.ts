@@ -1,6 +1,7 @@
 import { Mongodb, type MongoDbTypes } from "../database/db.js";
 import type { IpInfo } from "../utils/ip.js";
 import { logger } from "../utils/logger.js";
+import { calcGroupIdFromIds } from "../utils/node.js";
 import { sleep } from "../utils/time.js";
 
 namespace NodeService {
@@ -181,6 +182,7 @@ namespace NodeService {
     }
 
     async function watchLiteNodes() {
+        const isGotRunningIds: { [server: string]: boolean } = {};
         while (true) {
             let servers: MongoDbTypes.LiteNode[] = [..._currentLiteNodes];
             // Check removed node and delete them from status object
@@ -203,14 +205,13 @@ namespace NodeService {
             results.forEach((tickInfo, index) => {
                 let serverObject =
                     _status.liteServers[servers[index]!.server as string];
+                const serverIp = servers[index]!.server;
                 if (tickInfo.tick !== -1 || !serverObject) {
                     let oldTick = serverObject?.tick || -1;
                     let operator = servers[index]?.operator || "unknown";
-                    _status.liteServers[servers[index]?.server as string] = {
+                    _status.liteServers[serverIp] = {
                         operator: operator,
-                        ipInfo:
-                            _ipInfoCache[servers[index]?.server as string] ||
-                            {},
+                        ipInfo: _ipInfoCache[serverIp] || {},
                         tick: tickInfo.tick,
                         initialTick: tickInfo.initialTick,
                         epoch: tickInfo.epoch,
@@ -227,6 +228,36 @@ namespace NodeService {
                                 ? Date.now()
                                 : serverObject?.lastTickChanged || -1,
                     };
+
+                    if (
+                        tickInfo.tick !== -1 &&
+                        !isGotRunningIds[serverIp] &&
+                        (!servers[index]!.groupId ||
+                            servers[index]!.groupId === "")
+                    ) {
+                        // Try to get running IDs from the lite node
+                        isGotRunningIds[serverIp] = true;
+                        NodeService.tryGetIdsFromLiteNode(serverIp).then(
+                            (ids) => {
+                                let groupId = calcGroupIdFromIds(ids);
+                                servers[index]!.groupId = groupId;
+                                Mongodb.getLiteNodeCollection()
+                                    .updateOne(
+                                        {
+                                            server: serverIp,
+                                        },
+                                        {
+                                            $set: {
+                                                ids: ids,
+                                                groupId: groupId,
+                                            },
+                                        }
+                                    )
+                                    .then()
+                                    .catch(() => {});
+                            }
+                        );
+                    }
                 }
             });
 

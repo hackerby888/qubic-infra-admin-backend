@@ -1210,6 +1210,7 @@ namespace HttpServer {
                             _id: 0,
                             password: 0,
                             setupLogs: 0,
+                            deployLogs: 0,
                         })
                         .toArray();
                     res.json({ servers });
@@ -1269,6 +1270,54 @@ namespace HttpServer {
                     );
                     res.status(500).json({
                         error: "Failed to fetch setup logs " + error,
+                    });
+                }
+            }
+        );
+
+        app.get(
+            "/deploy-logs",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let server = req.query.server as string;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (!server) {
+                        res.status(400).json({ error: "No server specified" });
+                        return;
+                    }
+                    let serverDoc =
+                        await Mongodb.getServersCollection().findOne(
+                            {
+                                server: server,
+                                operator: operator,
+                            },
+                            {
+                                projection: {
+                                    _id: 0,
+                                    deployLogs: 1,
+                                },
+                            }
+                        );
+                    if (!serverDoc) {
+                        res.status(404).json({ error: "Server not found" });
+                        return;
+                    }
+                    res.json({
+                        deployLogs: serverDoc.deployLogs || {},
+                    });
+                } catch (error) {
+                    logger.error(
+                        `Error fetching deploy logs: ${
+                            (error as Error).message
+                        }`
+                    );
+                    res.status(500).json({
+                        error: "Failed to fetch deploy logs " + error,
                     });
                 }
             }

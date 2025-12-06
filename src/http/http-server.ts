@@ -1732,6 +1732,38 @@ namespace HttpServer {
             }
         });
 
+        app.get("/random-peers", (req, res) => {
+            try {
+                let service = req.query.service as MongoDbTypes.ServiceType;
+                if (service == MongoDbTypes.ServiceType.LiteNode) {
+                    let peers = NodeService.getRandomLiteNode(4).map(
+                        (peer) => peer.server
+                    );
+                    res.json({ peers: peers });
+                } else if (service == MongoDbTypes.ServiceType.BobNode) {
+                    let litePeers = NodeService.getRandomLiteNode(2).map(
+                        (peer) => peer.server
+                    );
+                    let bobPeers = NodeService.getRandomBobNode(2).map(
+                        (peer) => peer.server
+                    );
+                    res.json({
+                        litePeers: litePeers,
+                        bobPeers: bobPeers,
+                    });
+                } else {
+                    res.status(400).json({ error: "Invalid service type" });
+                }
+            } catch (error) {
+                logger.error(
+                    `Error fetching random peers: ${(error as Error).message}`
+                );
+                res.status(500).json({
+                    error: "Failed to fetch random peers " + error,
+                });
+            }
+        });
+
         let server = app.listen(port, () => {
             logger.info(`HTTP Server is running at http://localhost:${port}`);
         });

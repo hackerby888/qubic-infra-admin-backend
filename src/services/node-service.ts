@@ -1,4 +1,5 @@
 import { Mongodb, type MongoDbTypes } from "../database/db.js";
+import { isNodeActive } from "../utils/common.js";
 import type { IpInfo } from "../utils/ip.js";
 import { logger } from "../utils/logger.js";
 import { calcGroupIdFromIds } from "../utils/node.js";
@@ -392,6 +393,58 @@ namespace NodeService {
                 `Pulled ${liteServers.length} Lite Nodes and ${bobServers.length} Bob Nodes from database`
             );
         } catch (error) {}
+    }
+
+    export function getRandomLiteNode(n: number) {
+        let servers: MongoDbTypes.LiteNode[] = [..._currentLiteNodes];
+        if (n >= servers.length) {
+            return servers;
+        }
+
+        let selectedServers: MongoDbTypes.LiteNode[] = [];
+        let usedIndices: Set<number> = new Set();
+
+        while (selectedServers.length < n) {
+            let randomIndex = Math.floor(Math.random() * servers.length);
+            if (
+                !usedIndices.has(randomIndex) &&
+                isNodeActive(
+                    _status.liteServers[servers[randomIndex]!.server]
+                        ?.lastTickChanged || 0
+                )
+            ) {
+                usedIndices.add(randomIndex);
+                selectedServers.push(servers[randomIndex]!);
+            }
+        }
+
+        return selectedServers;
+    }
+
+    export function getRandomBobNode(n: number) {
+        let servers: MongoDbTypes.BobNode[] = [..._currentBobNodes];
+        if (n >= servers.length) {
+            return servers;
+        }
+
+        let selectedServers: MongoDbTypes.BobNode[] = [];
+        let usedIndices: Set<number> = new Set();
+
+        while (selectedServers.length < n) {
+            let randomIndex = Math.floor(Math.random() * servers.length);
+            if (
+                !usedIndices.has(randomIndex) &&
+                isNodeActive(
+                    _status.bobServers[servers[randomIndex]!.server]
+                        ?.lastTickChanged || 0
+                )
+            ) {
+                usedIndices.add(randomIndex);
+                selectedServers.push(servers[randomIndex]!);
+            }
+        }
+
+        return selectedServers;
     }
 
     export async function start() {

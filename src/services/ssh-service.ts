@@ -11,6 +11,32 @@ import {
     inlineBashCommands,
 } from "../utils/common.js";
 
+namespace Utils {
+    export function getBobConfigOverrideObject(peers: string[]) {
+        let overrideConfig: { [key: string]: any } = {};
+        if (
+            peers.length == 1 &&
+            peers[0]?.toLowerCase().startsWith("bm:127.0.0.1")
+        ) {
+            overrideConfig["request-cycle-ms"] = 200;
+            overrideConfig["future-offset"] = 16;
+            overrideConfig["tx_tick_to_live"] = 100000;
+            overrideConfig["max-thread"] = 16;
+
+            return overrideConfig;
+        }
+
+        let haveAtLeastOneBobPeer = peers.some((p) => p.startsWith("bob:"));
+        if (haveAtLeastOneBobPeer) {
+            overrideConfig["trusted-entities"] = [
+                "QCTBOBEPDEZGBBCSOWGBYCAIZESDMEVRGLWVNBZAPBIZYEJFFZSPPIVGSCVL",
+            ];
+        }
+
+        return overrideConfig;
+    }
+}
+
 export namespace SSHService {
     export const LITE_SCREEN_NAME = "qubic";
     export const BOB_SCREEN_NAME = "bob";
@@ -19,9 +45,9 @@ export namespace SSHService {
         "p2p-node": [],
         // Format: BM:ip:port:0-0-0-0 where 0-0-0-0 is the passcode
         "trusted-node": [],
-        "request-cycle-ms": 200,
+        "request-cycle-ms": 100,
         "request-logging-cycle-ms": 10,
-        "future-offset": 16,
+        "future-offset": 5,
         "log-level": "info",
         "keydb-url": "tcp://127.0.0.1:6379",
         "run-server": true,
@@ -31,8 +57,8 @@ export namespace SSHService {
         "tick-storage-mode": "kvrocks",
         "kvrocks-url": "tcp://127.0.0.1:6666",
         "tx-storage-mode": "kvrocks",
-        tx_tick_to_live: 100000,
-        "max-thread": 16,
+        tx_tick_to_live: 3000,
+        "max-thread": 6,
         "spam-qu-threshold": 100,
     };
 
@@ -158,6 +184,7 @@ export namespace SSHService {
                 "trusted-node": peers
                     .filter((p) => p && p.startsWith("BM:"))
                     .map((p) => p.trim()),
+                ...Utils.getBobConfigOverrideObject(peers),
             };
 
             let targetGbForKeyDb =

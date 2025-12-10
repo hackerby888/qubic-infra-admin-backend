@@ -406,6 +406,16 @@ namespace NodeService {
         let selectedServers: MongoDbTypes.LiteNode[] = [];
         let usedIndices: Set<number> = new Set();
 
+        let numberOfActiveNodes = servers.filter((server) =>
+            isNodeActive(
+                _status.liteServers[server.server]?.lastTickChanged || 0
+            )
+        ).length;
+
+        if (numberOfActiveNodes < n) {
+            n = numberOfActiveNodes;
+        }
+
         while (selectedServers.length < n) {
             let randomIndex = Math.floor(Math.random() * servers.length);
             if (
@@ -431,6 +441,16 @@ namespace NodeService {
 
         let selectedServers: MongoDbTypes.BobNode[] = [];
         let usedIndices: Set<number> = new Set();
+
+        let numberOfActiveNodes = servers.filter((server) =>
+            isNodeActive(
+                _status.bobServers[server.server]?.lastTickChanged || 0
+            )
+        ).length;
+
+        if (numberOfActiveNodes < n) {
+            n = numberOfActiveNodes;
+        }
 
         while (selectedServers.length < n) {
             let randomIndex = Math.floor(Math.random() * servers.length);

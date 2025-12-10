@@ -262,7 +262,6 @@ namespace NodeService {
                 }
             });
 
-            logger.info("Finished one iteration of watching Lite Nodes");
             await sleep(IDLE_TIME);
         }
     }
@@ -318,7 +317,6 @@ namespace NodeService {
                 }
             });
 
-            logger.info("Finished one iteration of watching Bob Nodes");
             await sleep(IDLE_TIME);
         }
     }

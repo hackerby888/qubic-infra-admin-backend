@@ -542,11 +542,23 @@ namespace HttpServer {
 
             let binaryUrl: string = "";
             try {
-                binaryUrl = GithubService.getDownloadUrlForTag(
-                    tag,
-                    binaryFileMap[service as keyof typeof binaryFileMap],
-                    service
-                );
+                if (
+                    GithubService.getGithubTags(service)?.findIndex(
+                        (t) => t.name.trim() === tag.trim()
+                    ) === -1
+                ) {
+                    if (tag.startsWith("http")) {
+                        binaryUrl = tag;
+                    } else {
+                        throw new Error("Tag not found in GitHub releases");
+                    }
+                } else {
+                    binaryUrl = GithubService.getDownloadUrlForTag(
+                        tag,
+                        binaryFileMap[service as keyof typeof binaryFileMap],
+                        service
+                    );
+                }
             } catch (error) {
                 res.status(400).json({
                     error: (error as Error).message,
@@ -1503,16 +1515,34 @@ namespace HttpServer {
             MiddleWare.authenticateToken,
             async (req, res) => {
                 try {
+                    // format : command:service::params
                     const QUICKS_COMMANDS_MAP = {
-                        "esc/shutdown:lite": [
-                            `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b'`,
-                        ],
-                        "f8/savesnapshot:lite": [
-                            `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[19~'`,
-                        ],
-                        "f10/clearmemory:lite": [
-                            `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[21~'`,
-                        ],
+                        "esc/shutdown:lite": () => {
+                            return [
+                                `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b'`,
+                            ];
+                        },
+                        "f8/savesnapshot:lite": () => {
+                            return [
+                                `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[19~'`,
+                            ];
+                        },
+                        "f10/clearmemory:lite": () => {
+                            return [
+                                `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[21~'`,
+                            ];
+                        },
+                        "placebinary:bob": (url: string) => {
+                            if (!url || !url.startsWith("http")) {
+                                throw new Error("Invalid URL for binary");
+                            }
+                            return [
+                                `cd ~/qbob/`,
+                                `rm -rf bob`,
+                                `wget ${url}`,
+                                `chmod +x $(basename ${url})`,
+                            ];
+                        },
                     };
 
                     let operator = req.user?.username;
@@ -1637,14 +1667,37 @@ namespace HttpServer {
                     };
 
                     let commandsToBeExecuted: string[] = [];
-                    if (command in QUICKS_COMMANDS_MAP) {
-                        commandsToBeExecuted =
-                            QUICKS_COMMANDS_MAP[
-                                command as keyof typeof QUICKS_COMMANDS_MAP
-                            ];
-                    } else {
+                    // if (command in QUICKS_COMMANDS_MAP) {
+                    //     commandsToBeExecuted =
+                    //         QUICKS_COMMANDS_MAP[
+                    //             command as keyof typeof QUICKS_COMMANDS_MAP
+                    //         ];
+                    // } else {
+                    //     commandsToBeExecuted = [command];
+                    // }
+                    for (let cmdKey in QUICKS_COMMANDS_MAP) {
+                        if (command.startsWith(cmdKey)) {
+                            let cmdFunc =
+                                QUICKS_COMMANDS_MAP[
+                                    cmdKey as keyof typeof QUICKS_COMMANDS_MAP
+                                ];
+
+                            let params: string[] =
+                                command.split("::")[1]?.split(",") || [];
+
+                            // @ts-ignore
+                            commandsToBeExecuted = cmdFunc(...params);
+                            break;
+                        }
+                    }
+                    if (commandsToBeExecuted.length === 0) {
                         commandsToBeExecuted = [command];
                     }
+                    console.log(
+                        "Commands to be executed:",
+                        commandsToBeExecuted
+                    );
+
                     let commandsExecuted = 0;
                     for (let serverObject of serverDocs) {
                         SSHService.executeCommands(

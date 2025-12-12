@@ -140,6 +140,7 @@ export namespace SSHService {
             isRestart = false,
             systemRamInGB,
             ramMode,
+            bobConfig,
         }: {
             binaryUrl: string;
             epochFile: string;
@@ -147,6 +148,7 @@ export namespace SSHService {
             isRestart?: boolean;
             systemRamInGB: number;
             ramMode?: string;
+            bobConfig?: object;
         }) {
             const FINAL_START_COMMAND = `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`;
             const totalRamNeededInSystem = {
@@ -178,6 +180,7 @@ export namespace SSHService {
                 ...DEFAULT_BOB_CONFIG,
                 "p2p-node": peers.map((p) => p.trim()),
                 ...Utils.getBobConfigOverrideObject(peers),
+                ...(bobConfig || {}),
             };
 
             let targetGbForKeyDb =
@@ -205,8 +208,10 @@ export namespace SSHService {
                 // Beautify the config file using jq
                 `jq . bob_config.json > temp_config.json && mv temp_config.json bob_config.json`,
                 `echo "${binaryName}" > binary_name.txt`,
+                `echo "${targetGbForKeyDb}" > /etc/keydb_ram.txt`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
-                `screen -dmS keydb bash -lc "keydb-server /etc/keydb.conf --maxmemory ${targetGbForKeyDb}gb || exec bash"`,
+                `TARGET_GB_FOR_KEYDB=$(cat /etc/keydb_ram.txt)`,
+                `screen -dmS keydb bash -lc "keydb-server /etc/keydb.conf --maxmemory \${TARGET_GB_FOR_KEYDB}gb || exec bash"`,
                 `screen -dmS kvrocks bash -lc "kvrocks -c /etc/kvrocks.conf || exec bash"`,
                 `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
                 `until [[ "$(keydb-cli -h 127.0.0.1 -p 6666 ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for kvrocks..."; sleep 1; }; done`,
@@ -510,6 +515,7 @@ export namespace SSHService {
             mainAuxStatus,
             ids,
             ramMode,
+            bobConfig,
         }: {
             binaryUrl: string;
             epochFile: string;
@@ -518,6 +524,7 @@ export namespace SSHService {
             mainAuxStatus: number;
             ids: string[];
             ramMode: string;
+            bobConfig: object;
         }
     ) {
         const returnFailedObject: {
@@ -556,6 +563,7 @@ export namespace SSHService {
                         peers,
                         systemRamInGB,
                         ramMode,
+                        bobConfig,
                     })
                 );
             } else {

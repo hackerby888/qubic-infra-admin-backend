@@ -526,6 +526,7 @@ namespace HttpServer {
                 mainAuxStatus: number;
                 ids: string[];
                 ramMode: string;
+                bobConfig: object | undefined;
             } = req.body.extraData;
 
             let binaryFileMap = {
@@ -697,6 +698,7 @@ namespace HttpServer {
                             mainAuxStatus: extraData.mainAuxStatus,
                             ids: extraData.ids,
                             ramMode: extraData.ramMode,
+                            bobConfig: extraData.bobConfig || {},
                         }
                     )
                         .then((result) => {
@@ -1543,6 +1545,25 @@ namespace HttpServer {
                                 `chmod +x $(basename ${url})`,
                             ];
                         },
+                        "restartkeydb:bob": () => {
+                            return [
+                                `pkill -9 keydb-server || true`,
+                                `for s in $(screen -ls | awk '/keydb/ {print $1}'); do screen -S "$s" -X quit || true; done`,
+                                `while pgrep -x keydb-server >/dev/null; do { echo "Waiting for keydb to be shutdown..."; sleep 1; }; done`,
+                                `TARGET_GB_FOR_KEYDB=$(cat /etc/keydb_ram.txt)`,
+                                `screen -dmS keydb bash -lc "keydb-server /etc/keydb.conf --maxmemory \${TARGET_GB_FOR_KEYDB}gb || exec bash"`,
+                                `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
+                            ];
+                        },
+                        "restartkvrocks:bob": () => {
+                            return [
+                                `pkill -9 kvrocks || true`,
+                                `for s in $(screen -ls | awk '/kvrocks/ {print $1}'); do screen -S "$s" -X quit || true; done`,
+                                `while pgrep -x kvrocks >/dev/null; do { echo "Waiting for kvrocks to be shutdown..."; sleep 1; }; done`,
+                                `screen -dmS kvrocks bash -lc "kvrocks -c /etc/kvrocks.conf || exec bash"`,
+                                `until [[ "$(keydb-cli -h 127.0.0.1 -p 6666 ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for kvrocks..."; sleep 1; }; done`,
+                            ];
+                        },
                     };
 
                     let operator = req.user?.username;
@@ -1836,19 +1857,23 @@ namespace HttpServer {
 
         app.get("/random-peers", (req, res) => {
             try {
+                let expectedLitePeersLength =
+                    parseInt(req.query.litePeers as string) || 2;
+                let expectedBobPeersLength =
+                    parseInt(req.query.bobPeers as string) || 2;
                 let service = req.query.service as MongoDbTypes.ServiceType;
                 if (service == MongoDbTypes.ServiceType.LiteNode) {
-                    let peers = NodeService.getRandomLiteNode(4).map(
-                        (peer) => peer.server
-                    );
+                    let peers = NodeService.getRandomLiteNode(
+                        expectedLitePeersLength
+                    ).map((peer) => peer.server);
                     res.json({ peers: peers });
                 } else if (service == MongoDbTypes.ServiceType.BobNode) {
-                    let litePeers = NodeService.getRandomLiteNode(2).map(
-                        (peer) => peer.server
-                    );
-                    let bobPeers = NodeService.getRandomBobNode(2).map(
-                        (peer) => peer.server
-                    );
+                    let litePeers = NodeService.getRandomLiteNode(
+                        expectedLitePeersLength
+                    ).map((peer) => peer.server);
+                    let bobPeers = NodeService.getRandomBobNode(
+                        expectedBobPeersLength
+                    ).map((peer) => peer.server);
                     res.json({
                         litePeers: litePeers,
                         bobPeers: bobPeers,

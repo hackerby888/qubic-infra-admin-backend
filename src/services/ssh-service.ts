@@ -41,10 +41,8 @@ export namespace SSHService {
     export const LITE_SCREEN_NAME = "qubic";
     export const BOB_SCREEN_NAME = "bob";
     export const DEFAULT_BOB_CONFIG = {
-        // Format: bob:ip:port
+        // Format: bob:ip:port or BM:ip:port:0-0-0-0 where 0-0-0-0 is the passcode
         "p2p-node": [],
-        // Format: BM:ip:port:0-0-0-0 where 0-0-0-0 is the passcode
-        "trusted-node": [],
         "request-cycle-ms": 100,
         "request-logging-cycle-ms": 10,
         "future-offset": 5,
@@ -178,12 +176,7 @@ export namespace SSHService {
 
             let currentBobConfig = {
                 ...DEFAULT_BOB_CONFIG,
-                "p2p-node": peers
-                    .filter((p) => p && p.startsWith("bob:"))
-                    .map((p) => p.trim()),
-                "trusted-node": peers
-                    .filter((p) => p && p.startsWith("BM:"))
-                    .map((p) => p.trim()),
+                "p2p-node": peers.map((p) => p.trim()),
                 ...Utils.getBobConfigOverrideObject(peers),
             };
 

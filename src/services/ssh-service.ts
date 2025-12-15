@@ -83,6 +83,7 @@ export namespace SSHService {
             isRestart = false,
             mainAuxStatus,
             ids,
+            loggingPasscode,
         }: {
             binaryUrl: string;
             epochFile: string;
@@ -90,8 +91,9 @@ export namespace SSHService {
             isRestart?: boolean;
             mainAuxStatus?: number;
             ids?: string[];
+            loggingPasscode?: string;
         }) {
-            const FINAL_START_COMMAND = `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS $SEEDS_ARG --node-mode $MAIN_AUX_STATUS || exec bash"`;
+            const FINAL_START_COMMAND = `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS $SEEDS_ARG --node-mode $MAIN_AUX_STATUS --reader-passcode $LOGGING_PASSCODE || exec bash"`;
             // If isRestart is true, skip setup steps and just start the node with existing configs
             if (isRestart) {
                 return [
@@ -101,6 +103,7 @@ export namespace SSHService {
                     `CURRENT_BINARY=$(cat binary_name.txt)`,
                     `IDS=$(cat ids.txt)`,
                     `MAIN_AUX_STATUS=$(cat main_aux_status.txt)`,
+                    `LOGGING_PASSCODE=$(cat logging_passcode.txt)`,
                     `SEEDS_ARG="\${IDS:+--seeds $IDS}"`,
                     FINAL_START_COMMAND,
                 ];
@@ -124,6 +127,8 @@ export namespace SSHService {
                 `echo "${binaryName}" > binary_name.txt`,
                 `echo "${idsInString}" > ids.txt`,
                 `echo "${mainAuxStatus || 0}" > main_aux_status.txt`,
+                `echo "${loggingPasscode}" > logging_passcode.txt`,
+                `LOGGING_PASSCODE=$(cat logging_passcode.txt)`,
                 `CURRENT_PEERS=$(cat peers.txt)`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
                 `IDS=$(cat ids.txt)`,
@@ -516,6 +521,7 @@ export namespace SSHService {
             ids,
             ramMode,
             bobConfig,
+            loggingPasscode,
         }: {
             binaryUrl: string;
             epochFile: string;
@@ -525,6 +531,7 @@ export namespace SSHService {
             ids: string[];
             ramMode: string;
             bobConfig: object;
+            loggingPasscode: string;
         }
     ) {
         const returnFailedObject: {
@@ -553,6 +560,7 @@ export namespace SSHService {
                         peers,
                         mainAuxStatus,
                         ids,
+                        loggingPasscode,
                     })
                 );
             } else if (type === MongoDbTypes.ServiceType.BobNode) {

@@ -527,6 +527,7 @@ namespace HttpServer {
                 ids: string[];
                 ramMode: string;
                 bobConfig: object | undefined;
+                loggingPasscode: string;
             } = req.body.extraData;
 
             let binaryFileMap = {
@@ -604,6 +605,25 @@ namespace HttpServer {
                         error: "The provided 'epochFile' URL is not accessible",
                     });
                     return;
+                }
+            }
+
+            if (extraData.loggingPasscode) {
+                // check logging passcode format
+                let passcodeParts = extraData.loggingPasscode.split("-");
+                if (passcodeParts.length !== 4) {
+                    res.status(400).json({
+                        error: "Logging passcode must have 4 parts separated by '-'",
+                    });
+                } else if (
+                    passcodeParts.some((part) => {
+                        let num = Number(part);
+                        return isNaN(num);
+                    })
+                ) {
+                    res.status(400).json({
+                        error: "Each part of the logging passcode must be a valid number",
+                    });
                 }
             }
 
@@ -699,6 +719,7 @@ namespace HttpServer {
                             ids: extraData.ids,
                             ramMode: extraData.ramMode,
                             bobConfig: extraData.bobConfig || {},
+                            loggingPasscode: extraData.loggingPasscode,
                         }
                     )
                         .then((result) => {
@@ -718,6 +739,21 @@ namespace HttpServer {
                                     ),
                                     status: "active",
                                 });
+
+                                Mongodb.getLiteNodeCollection()
+                                    .updateOne(
+                                        {
+                                            server: server.server,
+                                        },
+                                        {
+                                            $set: {
+                                                passcode:
+                                                    extraData.loggingPasscode,
+                                            },
+                                        }
+                                    )
+                                    .then()
+                                    .catch(() => {});
 
                                 NodeService.tryGetIdsFromLiteNode(
                                     server.server
@@ -1869,7 +1905,8 @@ namespace HttpServer {
                     res.json({ peers: peers });
                 } else if (service == MongoDbTypes.ServiceType.BobNode) {
                     let litePeers = NodeService.getRandomLiteNode(
-                        expectedLitePeersLength
+                        expectedLitePeersLength,
+                        true
                     ).map((peer) => peer.server);
                     let bobPeers = NodeService.getRandomBobNode(
                         expectedBobPeersLength

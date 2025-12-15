@@ -395,7 +395,10 @@ namespace NodeService {
         } catch (error) {}
     }
 
-    export function getRandomLiteNode(n: number) {
+    export function getRandomLiteNode(
+        n: number,
+        isNeedLoggingPasscode = false
+    ) {
         let servers: MongoDbTypes.LiteNode[] = [..._currentLiteNodes];
         if (n >= servers.length) {
             return servers;
@@ -404,10 +407,23 @@ namespace NodeService {
         let selectedServers: MongoDbTypes.LiteNode[] = [];
         let usedIndices: Set<number> = new Set();
 
+        const checkIsCandidateNode = (server: MongoDbTypes.LiteNode) => {
+            if (isNeedLoggingPasscode) {
+                return (
+                    isNodeActive(
+                        _status.liteServers[server.server]?.lastTickChanged || 0
+                    ) &&
+                    (!server.passcode || server.passcode.trim() === "0-0-0-0")
+                );
+            } else {
+                return isNodeActive(
+                    _status.liteServers[server.server]?.lastTickChanged || 0
+                );
+            }
+        };
+
         let numberOfActiveNodes = servers.filter((server) =>
-            isNodeActive(
-                _status.liteServers[server.server]?.lastTickChanged || 0
-            )
+            checkIsCandidateNode(server)
         ).length;
 
         if (numberOfActiveNodes < n) {
@@ -418,10 +434,7 @@ namespace NodeService {
             let randomIndex = Math.floor(Math.random() * servers.length);
             if (
                 !usedIndices.has(randomIndex) &&
-                isNodeActive(
-                    _status.liteServers[servers[randomIndex]!.server]
-                        ?.lastTickChanged || 0
-                )
+                checkIsCandidateNode(servers[randomIndex]!)
             ) {
                 usedIndices.add(randomIndex);
                 selectedServers.push(servers[randomIndex]!);
@@ -440,10 +453,14 @@ namespace NodeService {
         let selectedServers: MongoDbTypes.BobNode[] = [];
         let usedIndices: Set<number> = new Set();
 
-        let numberOfActiveNodes = servers.filter((server) =>
-            isNodeActive(
+        const checkIsCandidateNode = (server: MongoDbTypes.BobNode) => {
+            return isNodeActive(
                 _status.bobServers[server.server]?.lastTickChanged || 0
-            )
+            );
+        };
+
+        let numberOfActiveNodes = servers.filter((server) =>
+            checkIsCandidateNode(server)
         ).length;
 
         if (numberOfActiveNodes < n) {
@@ -454,10 +471,7 @@ namespace NodeService {
             let randomIndex = Math.floor(Math.random() * servers.length);
             if (
                 !usedIndices.has(randomIndex) &&
-                isNodeActive(
-                    _status.bobServers[servers[randomIndex]!.server]
-                        ?.lastTickChanged || 0
-                )
+                checkIsCandidateNode(servers[randomIndex]!)
             ) {
                 usedIndices.add(randomIndex);
                 selectedServers.push(servers[randomIndex]!);

@@ -24,6 +24,7 @@ export namespace MongoDbTypes {
         // groupId represents the operator group the lite node belongs to (like a cluster of Main/aux nodes)
         groupId?: string;
         isPrivate: boolean;
+        passcode?: string;
     }
 
     export interface BobNode {

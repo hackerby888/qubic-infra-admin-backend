@@ -528,6 +528,7 @@ namespace HttpServer {
                 ramMode: string;
                 bobConfig: object | undefined;
                 loggingPasscode: string;
+                operatorId: string;
             } = req.body.extraData;
 
             let binaryFileMap = {
@@ -627,6 +628,14 @@ namespace HttpServer {
                 }
             }
 
+            if (extraData.operatorId) {
+                if (extraData.operatorId.length !== 60) {
+                    res.status(400).json({
+                        error: "Operator ID must be exactly 60 characters",
+                    });
+                }
+            }
+
             // Get server details from DB
             let serverDocs: MongoDbTypes.Server[] = [];
             try {
@@ -720,6 +729,7 @@ namespace HttpServer {
                             ramMode: extraData.ramMode,
                             bobConfig: extraData.bobConfig || {},
                             loggingPasscode: extraData.loggingPasscode,
+                            operatorId: extraData.operatorId,
                         }
                     )
                         .then((result) => {

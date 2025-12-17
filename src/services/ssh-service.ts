@@ -324,7 +324,7 @@ export namespace SSHService {
             _isExecutingCommandsMap[host] ||
             Object.keys(_isExecutingCommandsMap).filter(
                 (h) => _isExecutingCommandsMap[h]
-            ).length > 5
+            ).length > 1000
         ) {
             // Wait if there is an ongoing execution for the same host and username
             await new Promise((resolve) => setTimeout(resolve, 100));
@@ -806,6 +806,7 @@ export namespace SSHService {
                     /\\n/g,
                     "\n"
                 ),
+                readyTimeout: 60_000,
             });
 
             let isFinallyDone = false;

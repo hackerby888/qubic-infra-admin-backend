@@ -708,6 +708,68 @@ namespace HttpServer {
                     .catch(() => {});
             };
 
+            let isAutoP2P =
+                extraData.peers && extraData.peers[0] === "auto_p2p";
+
+            // map ip to list of p2p peers
+            let p2pMap: Record<string, string[]> = {};
+            if (isAutoP2P) {
+                let baremetalNodes = extraData.peers?.slice(1);
+                if (!baremetalNodes || baremetalNodes.length === 0) {
+                    res.status(400).json({
+                        error: "No baremetal nodes specified for P2P connections.",
+                    });
+                    return;
+                }
+                let connectedNodes = [];
+                // first randomly choose 4 seed nodes (which connect to baremetal) and add to p2p map
+                let seedNodes = serverDocs
+                    .sort(() => 0.5 - Math.random())
+                    .slice(0, 4);
+                for (let seedNode of seedNodes) {
+                    p2pMap[seedNode.server] = baremetalNodes as string[];
+                    connectedNodes.push(seedNode.server);
+                }
+                // for the rest of the nodes, randomly choose 3 from waiting and 1 from connected nodes
+                for (let serverNode of serverDocs) {
+                    if (connectedNodes.includes(serverNode.server)) continue;
+
+                    let peersForNode = [];
+                    let waitingNodes = serverDocs.filter(
+                        (node) =>
+                            !connectedNodes.includes(node.server) &&
+                            node.server !== serverNode.server
+                    );
+                    // choose 3 from waiting nodes
+                    let waitingChoices = waitingNodes
+                        .sort(() => 0.5 - Math.random())
+                        .slice(0, 3);
+
+                    // if not enough waiting nodes, fill from connected nodes
+                    if (waitingChoices.length < 3) {
+                        let needed = 3 - waitingChoices.length;
+                        let extraConnected = connectedNodes
+                            .sort(() => 0.5 - Math.random())
+                            .slice(0, needed);
+                        for (let extra of extraConnected) {
+                            peersForNode.push(extra);
+                        }
+                    }
+                    for (let choice of waitingChoices) {
+                        peersForNode.push(choice.server);
+                    }
+                    // choose 1 from connected nodes
+                    if (connectedNodes.length > 0) {
+                        let connectedChoice = connectedNodes.sort(
+                            () => 0.5 - Math.random()
+                        )[0];
+                        peersForNode.push(connectedChoice);
+                    }
+                    p2pMap[serverNode.server] = peersForNode as string[];
+                    connectedNodes.push(serverNode.server);
+                }
+            }
+
             // Deploy to each server
             try {
                 for (let server of serverDocs) {
@@ -722,7 +784,9 @@ namespace HttpServer {
                         {
                             binaryUrl,
                             epochFile: extraData?.epochFile as string,
-                            peers: extraData?.peers as string[],
+                            peers:
+                                p2pMap[server.server] ||
+                                (extraData?.peers as string[]),
                             systemRamInGB: parseInt(server.ram || "0"),
                             mainAuxStatus: extraData.mainAuxStatus,
                             ids: extraData.ids,

@@ -1690,17 +1690,17 @@ namespace HttpServer {
                         return;
                     }
 
-                    let serverDocs = await Mongodb.getServersCollection()
-                        .find({
-                            server: { $in: servers },
-                            operator,
-                        })
-                        .toArray();
+                    let serverDocs = (
+                        await Mongodb.getServersCollection()
+                            .find({
+                                server: { $in: servers },
+                                operator,
+                            })
+                            .toArray()
+                    ).filter((s) => s.username && s.username.length > 0);
+                    servers = serverDocs.map((s) => s.server);
 
-                    if (
-                        serverDocs.length === 0 ||
-                        serverDocs.length !== servers.length
-                    ) {
+                    if (serverDocs.length === 0) {
                         res.status(404).json({
                             error: "No matching servers found in the database",
                         });

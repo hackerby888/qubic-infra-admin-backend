@@ -320,7 +320,12 @@ export namespace SSHService {
     };
 
     export async function _accquireExecutionLock(host: string) {
-        while (_isExecutingCommandsMap[host]) {
+        while (
+            _isExecutingCommandsMap[host] ||
+            Object.keys(_isExecutingCommandsMap).filter(
+                (h) => _isExecutingCommandsMap[h]
+            ).length > 5
+        ) {
             // Wait if there is an ongoing execution for the same host and username
             await new Promise((resolve) => setTimeout(resolve, 100));
         }

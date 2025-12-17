@@ -710,6 +710,14 @@ export namespace SSHService {
                 }
             };
             conn.on("ready", async () => {
+                // Timeout handling
+                if (timeout > 0) {
+                    setTimeout(() => {
+                        if (isFinallyDone) return;
+                        emitter.emit("error", new Error("SSH command timeout"));
+                    }, timeout);
+                }
+
                 logger.info(
                     `SSH Connection ready for ${host}@${username}. Executing commands...`
                 );
@@ -810,14 +818,6 @@ export namespace SSHService {
             });
 
             let isFinallyDone = false;
-
-            // Timeout handling
-            if (timeout > 0) {
-                setTimeout(() => {
-                    if (isFinallyDone) return;
-                    emitter.emit("error", new Error("SSH command timeout"));
-                }, timeout);
-            }
 
             await new Promise<void>((resolve, reject) => {
                 emitter.on("done", ({ isDoneSignalReceived }) => {

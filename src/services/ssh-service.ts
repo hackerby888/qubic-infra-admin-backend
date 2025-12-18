@@ -219,8 +219,8 @@ export namespace SSHService {
                 `cd qbob`,
                 `wget ${binaryUrl}`,
                 `chmod +x ./${binaryName}`,
-                `wget ${epochFile}`,
-                getUnzipCommandFromUrl(epochFile),
+                epochFile && `wget ${epochFile}`,
+                epochFile && getUnzipCommandFromUrl(epochFile),
                 // Write default config to config.json
                 keepOldConfig
                     ? `echo "Keeping existing bob_config.json"`
@@ -232,7 +232,6 @@ export namespace SSHService {
                 `echo "${binaryName}" > binary_name.txt`,
                 `echo "${targetGbForKeyDb}" > /etc/keydb_ram.txt`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
-                `TARGET_GB_FOR_KEYDB=$(cat /etc/keydb_ram.txt)`,
                 // Copy original config file and append custom keydb and kvrocks config
                 `cp /etc/keydb.conf /etc/keydb-runtime.conf && printf '\n\n' >> /etc/keydb-runtime.conf`,
                 `cp /etc/kvrocks.conf /etc/kvrocks-runtime.conf && printf '\n\n' >> /etc/kvrocks-runtime.conf`,
@@ -242,7 +241,7 @@ export namespace SSHService {
                 `echo '${(kvrocksConfig || []).join(
                     "\n"
                 )}' >> /etc/kvrocks-runtime.conf`,
-                `screen -dmS keydb bash -lc "keydb-server /etc/keydb-runtime.conf --maxmemory \${TARGET_GB_FOR_KEYDB}gb || exec bash"`,
+                `screen -dmS keydb bash -lc "keydb-server /etc/keydb-runtime.conf || exec bash"`,
                 `screen -dmS kvrocks bash -lc "kvrocks -c /etc/kvrocks-runtime.conf || exec bash"`,
                 `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
                 `until [[ "$(keydb-cli -h 127.0.0.1 -p 6666 ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for kvrocks..."; sleep 1; }; done`,

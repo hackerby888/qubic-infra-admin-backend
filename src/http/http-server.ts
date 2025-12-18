@@ -592,10 +592,7 @@ namespace HttpServer {
                 });
                 return;
             }
-            if (
-                service === MongoDbTypes.ServiceType.LiteNode ||
-                service === MongoDbTypes.ServiceType.BobNode
-            ) {
+            if (service === MongoDbTypes.ServiceType.LiteNode) {
                 if (!extraData.epochFile || !extraData.peers) {
                     res.status(400).json({
                         error: "Missing 'epochFile' or 'peers' in extraData for deployment",
@@ -789,7 +786,8 @@ namespace HttpServer {
                             epochFile: extraData?.epochFile as string,
                             peers:
                                 p2pMap[server.server] ||
-                                (extraData?.peers as string[]),
+                                (extraData?.peers as string[]) ||
+                                [],
                             systemRamInGB: parseInt(server.ram || "0"),
                             mainAuxStatus: extraData.mainAuxStatus,
                             ids: extraData.ids,

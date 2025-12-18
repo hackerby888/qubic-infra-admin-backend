@@ -151,6 +151,9 @@ export namespace SSHService {
             systemRamInGB,
             ramMode,
             bobConfig,
+            keydbConfig,
+            kvrocksConfig,
+            keepOldConfig,
         }: {
             binaryUrl: string;
             epochFile: string;
@@ -159,6 +162,9 @@ export namespace SSHService {
             systemRamInGB: number;
             ramMode?: string;
             bobConfig?: object;
+            keydbConfig?: string[];
+            kvrocksConfig?: string[];
+            keepOldConfig?: boolean;
         }) {
             const FINAL_START_COMMAND = `screen -dmS ${BOB_SCREEN_NAME} bash -lc "./$CURRENT_BINARY bob_config.json || exec bash"`;
             const totalRamNeededInSystem = {
@@ -202,7 +208,9 @@ export namespace SSHService {
             return [
                 `date`,
                 `cd ~`,
-                `rm -rf qbob`,
+                keepOldConfig
+                    ? `find ./qbob -mindepth 1 ! -name 'bob_config.json' -exec rm -rf {} +`
+                    : `rm -rf ./qbob/*`,
                 `rm -rf /data/flash/db/*`,
                 `mkdir -p /data/flash/db`,
                 `rm -rf /kvrocksDB/*`,
@@ -214,15 +222,28 @@ export namespace SSHService {
                 `wget ${epochFile}`,
                 getUnzipCommandFromUrl(epochFile),
                 // Write default config to config.json
-                `echo '${JSON.stringify(currentBobConfig)}' > bob_config.json`,
+                keepOldConfig
+                    ? `echo "Keeping existing bob_config.json"`
+                    : `echo '${JSON.stringify(
+                          currentBobConfig
+                      )}' > bob_config.json`,
                 // Beautify the config file using jq
                 `jq . bob_config.json > temp_config.json && mv temp_config.json bob_config.json`,
                 `echo "${binaryName}" > binary_name.txt`,
                 `echo "${targetGbForKeyDb}" > /etc/keydb_ram.txt`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
                 `TARGET_GB_FOR_KEYDB=$(cat /etc/keydb_ram.txt)`,
-                `screen -dmS keydb bash -lc "keydb-server /etc/keydb.conf --maxmemory \${TARGET_GB_FOR_KEYDB}gb || exec bash"`,
-                `screen -dmS kvrocks bash -lc "kvrocks -c /etc/kvrocks.conf || exec bash"`,
+                // Copy original config file and append custom keydb and kvrocks config
+                `cp /etc/keydb.conf /etc/keydb-runtime.conf && printf '\n\n' >> /etc/keydb-runtime.conf`,
+                `cp /etc/kvrocks.conf /etc/kvrocks-runtime.conf && printf '\n\n' >> /etc/kvrocks-runtime.conf`,
+                `echo '${(keydbConfig || []).join(
+                    "\n"
+                )}' >> /etc/keydb-runtime.conf`,
+                `echo '${(kvrocksConfig || []).join(
+                    "\n"
+                )}' >> /etc/kvrocks-runtime.conf`,
+                `screen -dmS keydb bash -lc "keydb-server /etc/keydb-runtime.conf --maxmemory \${TARGET_GB_FOR_KEYDB}gb || exec bash"`,
+                `screen -dmS kvrocks bash -lc "kvrocks -c /etc/kvrocks-runtime.conf || exec bash"`,
                 `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
                 `until [[ "$(keydb-cli -h 127.0.0.1 -p 6666 ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for kvrocks..."; sleep 1; }; done`,
                 FINAL_START_COMMAND,
@@ -241,8 +262,8 @@ export namespace SSHService {
                 ];
             } else if (type === MongoDbTypes.ServiceType.BobNode) {
                 let killDbCommands = [
-                    `pkill -9 keydb-server || true`,
-                    `pkill -9 kvrocks || true`,
+                    `pkill -9 keydb-server || true; sleep 1; pkill -9 keydb-server || true`,
+                    `pkill -9 kvrocks || true ; sleep 1; pkill -9 kvrocks || true`,
                     `for s in $(screen -ls | awk '/keydb/ {print $1}'); do screen -S "$s" -X quit || true; done`,
                     `for s in $(screen -ls | awk '/kvrocks/ {print $1}'); do screen -S "$s" -X quit || true; done`,
                     `while pgrep -x keydb-server >/dev/null; do { echo "Waiting for keydb to be shutdown..."; sleep 1; }; done`,
@@ -468,7 +489,7 @@ export namespace SSHService {
             username,
             password,
             commands,
-            0,
+            60 * 1000, // 1 min
             {
                 isNonInteractive: true,
                 sshPrivateKey: sshPrivateKey,
@@ -502,7 +523,7 @@ export namespace SSHService {
             username,
             password,
             commands,
-            0,
+            60 * 1000, // 1 min
             {
                 isNonInteractive: false,
                 sshPrivateKey: sshPrivateKey,
@@ -533,6 +554,9 @@ export namespace SSHService {
             bobConfig,
             loggingPasscode,
             operatorId,
+            keydbConfig,
+            kvrocksConfig,
+            keepOldConfig,
         }: {
             binaryUrl: string;
             epochFile: string;
@@ -544,6 +568,9 @@ export namespace SSHService {
             bobConfig: object;
             loggingPasscode: string;
             operatorId: string;
+            keydbConfig: string[];
+            kvrocksConfig: string[];
+            keepOldConfig: boolean;
         }
     ) {
         const returnFailedObject: {
@@ -585,6 +612,9 @@ export namespace SSHService {
                         systemRamInGB,
                         ramMode,
                         bobConfig,
+                        keydbConfig,
+                        kvrocksConfig,
+                        keepOldConfig,
                     })
                 );
             } else {

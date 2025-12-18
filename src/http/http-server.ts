@@ -529,6 +529,9 @@ namespace HttpServer {
                 bobConfig: object | undefined;
                 loggingPasscode: string;
                 operatorId: string;
+                keydbConfig?: string[];
+                kvrocksConfig?: string[];
+                keepOldConfig?: boolean;
             } = req.body.extraData;
 
             let binaryFileMap = {
@@ -794,6 +797,9 @@ namespace HttpServer {
                             bobConfig: extraData.bobConfig || {},
                             loggingPasscode: extraData.loggingPasscode,
                             operatorId: extraData.operatorId,
+                            keydbConfig: extraData.keydbConfig || [],
+                            kvrocksConfig: extraData.kvrocksConfig || [],
+                            keepOldConfig: extraData.keepOldConfig || false,
                         }
                     )
                         .then((result) => {
@@ -2001,6 +2007,77 @@ namespace HttpServer {
                 });
             }
         });
+
+        app.get(
+            "/shortcut-commands",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    let commands = await Mongodb.getShortcutCommandsCollection()
+                        .find({
+                            operator: operator,
+                        })
+                        .project({ _id: 0 })
+                        .toArray();
+                    res.json({ commands });
+                } catch (error) {
+                    logger.error(
+                        `Error fetching shortcut commands: ${
+                            (error as Error).message
+                        }`
+                    );
+                    res.status(500).json({
+                        error: "Failed to fetch shortcut commands " + error,
+                    });
+                }
+            }
+        );
+
+        app.post(
+            "/add-shortcut-command",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let name = req.body.name as string;
+                    let command = req.body.command as string;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (!name || !command) {
+                        res.status(400).json({
+                            error: "Name and command are required",
+                        });
+                        return;
+                    }
+
+                    await Mongodb.getShortcutCommandsCollection().insertOne({
+                        operator: operator,
+                        name: name,
+                        command: command,
+                    });
+
+                    res.json({
+                        message: "Shortcut command added successfully",
+                    });
+                } catch (error) {
+                    logger.error(
+                        `Error adding shortcut command: ${
+                            (error as Error).message
+                        }`
+                    );
+                    res.status(500).json({
+                        error: "Failed to add shortcut command " + error,
+                    });
+                }
+            }
+        );
 
         let server = app.listen(port, () => {
             logger.info(`HTTP Server is running at http://localhost:${port}`);

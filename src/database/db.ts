@@ -17,6 +17,12 @@ export namespace MongoDbTypes {
         | "restarting";
     export type CommandStatus = "pending" | "completed" | "failed";
 
+    export interface ShortcutCommand {
+        operator: string;
+        name: string;
+        command: string;
+    }
+
     export interface LiteNode {
         server: string;
         operator?: string;
@@ -142,6 +148,12 @@ export namespace Mongodb {
             throw new Error("Database not connected. Call connectDB first.");
         }
         return db;
+    }
+
+    export function getShortcutCommandsCollection() {
+        return getDB().collection<MongoDbTypes.ShortcutCommand>(
+            "shortcut_commands"
+        );
     }
 
     export function getLiteNodeCollection() {

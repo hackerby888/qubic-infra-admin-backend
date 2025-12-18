@@ -2079,6 +2079,45 @@ namespace HttpServer {
             }
         );
 
+        app.delete(
+            "/delete-shortcut-command",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let name = req.body.name as string;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (!name) {
+                        res.status(400).json({
+                            error: "Name is required",
+                        });
+                        return;
+                    }
+
+                    await Mongodb.getShortcutCommandsCollection().deleteOne({
+                        operator: operator,
+                        name: name,
+                    });
+
+                    res.json({
+                        message: "Shortcut command deleted successfully",
+                    });
+                } catch (error) {
+                    logger.error(
+                        `Error deleting shortcut command: ${
+                            (error as Error).message
+                        }`
+                    );
+                    res.status(500).json({
+                        error: "Failed to delete shortcut command " + error,
+                    });
+                }
+            }
+        );
+
         let server = app.listen(port, () => {
             logger.info(`HTTP Server is running at http://localhost:${port}`);
         });

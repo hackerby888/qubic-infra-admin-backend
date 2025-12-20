@@ -1546,6 +1546,8 @@ namespace HttpServer {
                         .limit(limit)
                         .project({
                             _id: 0,
+                            stdout: 0,
+                            stderr: 0,
                         })
                         .toArray();
                     res.json({ commandLogs });
@@ -1561,6 +1563,38 @@ namespace HttpServer {
                 }
             }
         );
+
+        app.get("/stdout-command-log", async (req, res) => {
+            try {
+                let uuid = req.query.uuid as string;
+                if (!uuid) {
+                    res.status(400).json({ error: "No uuid specified" });
+                    return;
+                }
+                let commandLog =
+                    await Mongodb.getCommandLogsCollection().findOne(
+                        { uuid: uuid },
+                        { projection: { _id: 0, stdout: 1, stderr: 1 } }
+                    );
+                if (!commandLog) {
+                    res.status(404).json({ error: "Command log not found" });
+                    return;
+                }
+                res.json({
+                    stdout: commandLog.stdout || "",
+                    stderr: commandLog.stderr || "",
+                });
+            } catch (error) {
+                logger.error(
+                    `Error fetching stdout of command log: ${
+                        (error as Error).message
+                    }`
+                );
+                res.status(500).json({
+                    error: "Failed to fetch stdout of command log " + error,
+                });
+            }
+        });
 
         app.post(
             "/delete-command-log",

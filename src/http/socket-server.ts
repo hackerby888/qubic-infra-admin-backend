@@ -64,34 +64,32 @@ export namespace SocketServer {
                         );
                     }
 
-                    statuses.liteNodes =
-                        socket.service === MongoDbTypes.ServiceType.LiteNode
-                            ? statuses.liteNodes.map((status) => {
-                                  let nodeDoc = liteNodesFromDb.find(
-                                      (node) => node.server === status.server
-                                  );
-                                  return {
-                                      ...status,
-                                      isPrivate: nodeDoc
-                                          ? nodeDoc.isPrivate
-                                          : false,
-                                  };
-                              })
-                            : [];
-                    statuses.bobNodes =
-                        socket.service === MongoDbTypes.ServiceType.BobNode
-                            ? statuses.bobNodes.map((status) => {
-                                  let nodeDoc = bobNodesFromDb.find(
-                                      (node) => node.server === status.server
-                                  );
-                                  return {
-                                      ...status,
-                                      isPrivate: nodeDoc
-                                          ? nodeDoc.isPrivate
-                                          : false,
-                                  };
-                              })
-                            : [];
+                    statuses.liteNodes = true
+                        ? statuses.liteNodes.map((status) => {
+                              let nodeDoc = liteNodesFromDb.find(
+                                  (node) => node.server === status.server
+                              );
+                              return {
+                                  ...status,
+                                  isPrivate: nodeDoc
+                                      ? nodeDoc.isPrivate
+                                      : false,
+                              };
+                          })
+                        : [];
+                    statuses.bobNodes = true
+                        ? statuses.bobNodes.map((status) => {
+                              let nodeDoc = bobNodesFromDb.find(
+                                  (node) => node.server === status.server
+                              );
+                              return {
+                                  ...status,
+                                  isPrivate: nodeDoc
+                                      ? nodeDoc.isPrivate
+                                      : false,
+                              };
+                          })
+                        : [];
 
                     socket.emit("realtimeStatsUpdate", statuses);
                 }

@@ -138,7 +138,7 @@ namespace HttpServer {
                 };
             });
 
-            res.json({ statuses });
+            res.json({ ...statuses });
         });
 
         app.post(

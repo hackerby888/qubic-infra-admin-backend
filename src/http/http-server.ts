@@ -2150,6 +2150,30 @@ namespace HttpServer {
             }
         );
 
+        app.post("/server-info-for-map", async (req, res) => {
+            try {
+                let servers = await Mongodb.getServersCollection()
+                    .find({}, { projection: { _id: 0, server: 1, ipInfo: 1 } })
+                    .toArray();
+
+                let responseServers = servers.map((s) => ({
+                    server: s.server,
+                    lat: s.ipInfo?.lat || 0,
+                    lon: s.ipInfo?.lon || 0,
+                }));
+                res.json({ servers: responseServers });
+            } catch (error) {
+                logger.error(
+                    `Error fetching server info for map: ${
+                        (error as Error).message
+                    }`
+                );
+                res.status(500).json({
+                    error: "Failed to fetch server info for map " + error,
+                });
+            }
+        });
+
         let server = app.listen(port, () => {
             logger.info(`HTTP Server is running at http://localhost:${port}`);
         });

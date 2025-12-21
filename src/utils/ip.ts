@@ -3,6 +3,8 @@ export interface IpInfo {
     region: string;
     city: string;
     isp: string;
+    lat: number;
+    lon: number;
 }
 
 export async function lookupIp(ip: string): Promise<IpInfo> {
@@ -25,6 +27,8 @@ export async function lookupIp(ip: string): Promise<IpInfo> {
                 region: data.regionName,
                 city: data.city,
                 isp: data.isp,
+                lat: data.lat,
+                lon: data.lon,
             };
         } catch (error) {
             console.error(
@@ -40,5 +44,7 @@ export async function lookupIp(ip: string): Promise<IpInfo> {
         region: "Unknown",
         city: "Unknown",
         isp: "Unknown",
+        lat: 0,
+        lon: 0,
     };
 }

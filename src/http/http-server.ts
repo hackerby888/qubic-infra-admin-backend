@@ -126,6 +126,7 @@ namespace HttpServer {
                 return {
                     ...status,
                     isPrivate: nodeDoc ? nodeDoc.isPrivate : false,
+                    server: "",
                 };
             });
             statuses.bobNodes = statuses.bobNodes.map((status) => {
@@ -135,6 +136,7 @@ namespace HttpServer {
                 return {
                     ...status,
                     isPrivate: nodeDoc ? nodeDoc.isPrivate : false,
+                    server: "",
                 };
             });
 

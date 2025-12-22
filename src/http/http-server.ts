@@ -11,6 +11,7 @@ import { v4 as uuidv4 } from "uuid";
 import { millisToSeconds } from "../utils/time.js";
 import { lookupIp, type IpInfo } from "../utils/ip.js";
 import { calcGroupIdFromIds } from "../utils/node.js";
+import { hashSHA256 } from "../utils/crypto.js";
 
 declare global {
     namespace Express {
@@ -119,6 +120,18 @@ namespace HttpServer {
                 });
             }
 
+            let serverHash: Record<string, string> = {};
+            for (let status of statuses.liteNodes) {
+                if (!serverHash[status.server]) {
+                    serverHash[status.server] = await hashSHA256(status.server);
+                }
+            }
+            for (let status of statuses.bobNodes) {
+                if (!serverHash[status.server]) {
+                    serverHash[status.server] = await hashSHA256(status.server);
+                }
+            }
+
             statuses.liteNodes = statuses.liteNodes.map((status) => {
                 let nodeDoc = liteNodesFromDb.find(
                     (node) => node.server === status.server
@@ -126,7 +139,7 @@ namespace HttpServer {
                 return {
                     ...status,
                     isPrivate: nodeDoc ? nodeDoc.isPrivate : false,
-                    server: "",
+                    server: serverHash[status.server] as string,
                 };
             });
             statuses.bobNodes = statuses.bobNodes.map((status) => {
@@ -136,7 +149,7 @@ namespace HttpServer {
                 return {
                     ...status,
                     isPrivate: nodeDoc ? nodeDoc.isPrivate : false,
-                    server: "",
+                    server: serverHash[status.server] as string,
                 };
             });
 
@@ -2158,8 +2171,17 @@ namespace HttpServer {
                     .find({}, { projection: { _id: 0, server: 1, ipInfo: 1 } })
                     .toArray();
 
+                let serverHash: Record<string, string> = {};
+                for (let server of servers) {
+                    if (!serverHash[server.server]) {
+                        serverHash[server.server] = await hashSHA256(
+                            server.server
+                        );
+                    }
+                }
+
                 let responseServers = servers.map((s) => ({
-                    server: s.server,
+                    server: serverHash[s.server] as string,
                     lat: s.ipInfo?.lat || 0,
                     lon: s.ipInfo?.lon || 0,
                 }));

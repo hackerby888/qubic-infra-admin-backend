@@ -213,9 +213,6 @@ export namespace SocketServer {
                     service: MongoDbTypes.ServiceType;
                     operator?: string;
                 }) => {
-                    if (!data.operator) {
-                        return;
-                    }
                     logger.info(
                         `Socket ${socket.id} subscribed to realtime stats`
                     );

@@ -4,6 +4,7 @@ import type { IpInfo } from "../utils/ip.js";
 import { logger } from "../utils/logger.js";
 import { calcGroupIdFromIds } from "../utils/node.js";
 import { sleep } from "../utils/time.js";
+import { SSHService } from "./ssh-service.js";
 
 namespace NodeService {
     const IDLE_TIME = 1000; // 1 second
@@ -23,6 +24,7 @@ namespace NodeService {
         mainAuxStatus: number;
         groupId: string;
         isPrivate?: boolean;
+        isSavingSnapshot: boolean;
     }
 
     export interface BobNodeTickInfo {
@@ -63,7 +65,9 @@ namespace NodeService {
         bobServers: {},
     };
 
-    async function getLiteNodeTickInfo(server: string) {
+    async function getLiteNodeTickInfo(
+        server: string
+    ): Promise<LiteNodeTickInfo> {
         const url = `http://${server}:${DEFAULT_LITE_NODE_HTTP_PORT}/tick-info`;
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 1000);
@@ -82,6 +86,7 @@ namespace NodeService {
             return data;
         } catch (error) {
             return {
+                isSavingSnapshot: false,
                 tick: -1,
                 epoch: -1,
                 alignedVotes: -1,
@@ -91,6 +96,8 @@ namespace NodeService {
                 mainAuxStatus: -1,
                 lastTickChanged: -1,
                 groupId: "",
+                operator: "",
+                ipInfo: {},
             };
         }
     }
@@ -220,6 +227,7 @@ namespace NodeService {
                         misalignedVotes: tickInfo.misalignedVotes,
                         mainAuxStatus: tickInfo.mainAuxStatus,
                         groupId: servers[index]?.groupId || "",
+                        isSavingSnapshot: Boolean(tickInfo.isSavingSnapshot),
                         lastUpdated:
                             tickInfo.tick !== -1
                                 ? Date.now()
@@ -481,10 +489,110 @@ namespace NodeService {
         return selectedServers;
     }
 
+    async function watchAndSaveSnapshot() {
+        const SAVE_INTERVAL = 5 * 60 * 1000; // 5 minutes
+        const WINDOW_SAVE_INTERVAL = 60 * 60 * 1000; // 1 hour
+
+        let lastSaveTickMap: { [server: string]: number } = {};
+
+        let numberOfNodesPerSave = 0;
+        let currentPendingNodes: MongoDbTypes.Server[] = [];
+
+        while (true) {
+            try {
+                // select random `numberOfNodesPerSave` nodes from currentPendingNodes
+                let nodesToSave: MongoDbTypes.Server[] = [];
+                if (currentPendingNodes.length <= numberOfNodesPerSave) {
+                    // set up
+                    // obtain operator cronjob to see if the save snapshot is enabled
+                    let isOperatorCronJobEnabledMap: {
+                        [operator: string]: boolean;
+                    } = {};
+                    let operatorCronJobs = await Mongodb.getCronJobsCollection()
+                        .find({
+                            command: "auto-save-snapshot",
+                        })
+                        .toArray();
+                    for (let job of operatorCronJobs) {
+                        isOperatorCronJobEnabledMap[job.operator] = true;
+                    }
+
+                    let liteNodes = [..._currentLiteNodes];
+                    let liteNodesDbDocs = (await Mongodb.getServersCollection()
+                        .find({})
+                        .toArray()) as MongoDbTypes.Server[];
+                    liteNodesDbDocs = liteNodesDbDocs.filter(
+                        (doc) =>
+                            doc.username &&
+                            liteNodes.some((ln) => ln.server === doc.server)
+                    );
+                    liteNodesDbDocs = liteNodesDbDocs.filter(
+                        (doc) => isOperatorCronJobEnabledMap[doc.operator]
+                    );
+                    numberOfNodesPerSave = Math.ceil(
+                        liteNodesDbDocs.length /
+                            (WINDOW_SAVE_INTERVAL / SAVE_INTERVAL)
+                    );
+                    // reset
+                    nodesToSave = [...currentPendingNodes];
+                    currentPendingNodes = [...liteNodesDbDocs];
+                } else {
+                    while (nodesToSave.length < numberOfNodesPerSave) {
+                        let randomIndex = Math.ceil(
+                            Math.random() * currentPendingNodes.length
+                        );
+                        let lastSaveTick =
+                            lastSaveTickMap[
+                                currentPendingNodes[randomIndex]!.server
+                            ] || 0;
+                        let currentTick =
+                            _status.liteServers[
+                                currentPendingNodes[randomIndex]!.server
+                            ]?.tick || 0;
+                        if (currentTick - lastSaveTick > 676 * 2) {
+                            nodesToSave.push(currentPendingNodes[randomIndex]!);
+                        }
+                        currentPendingNodes.splice(randomIndex, 1);
+                    }
+                }
+
+                // Save snapshot for selected nodes
+                for (let node of nodesToSave) {
+                    SSHService.executeCommands(
+                        node.server,
+                        node.username,
+                        node.password,
+                        [
+                            `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[19~'`,
+                        ],
+                        60_000,
+                        {
+                            sshPrivateKey: node.sshPrivateKey,
+                        }
+                    )
+                        .then(() => {
+                            logger.info(
+                                `Snapshot command sent to ${node.server}`
+                            );
+                        })
+                        .catch(() => {});
+                    lastSaveTickMap[node.server] =
+                        _status.liteServers[node.server]?.tick || 0;
+                }
+                await sleep(SAVE_INTERVAL);
+            } catch (error) {
+                logger.error(
+                    `Error in watchAndSaveSnapshot: ${(error as Error).message}`
+                );
+            }
+        }
+    }
+
     export async function start() {
         await pullServerLists();
         watchLiteNodes();
         watchBobNodes();
+        //watchAndSaveSnapshot();
     }
 }
 

@@ -17,6 +17,23 @@ export namespace MongoDbTypes {
         | "restarting";
     export type CommandStatus = "pending" | "completed" | "failed";
 
+    export interface CronJob {
+        operator: string;
+        cronId: string;
+        name: string;
+        schedule: string;
+        command: string;
+        type: "system" | "custom";
+        lastRun: number | null;
+        status: "success" | "failed" | "running" | "idle";
+        isEnabled: boolean;
+    }
+
+    export interface ServerIpInfo {
+        server: string;
+        ipInfo: IpInfo;
+    }
+
     export interface ShortcutCommand {
         operator: string;
         name: string;
@@ -148,6 +165,14 @@ export namespace Mongodb {
             throw new Error("Database not connected. Call connectDB first.");
         }
         return db;
+    }
+
+    export function getCronJobsCollection() {
+        return getDB().collection<MongoDbTypes.CronJob>("cron_jobs");
+    }
+
+    export function getServerIpInfoCollection() {
+        return getDB().collection<MongoDbTypes.ServerIpInfo>("server_ip_info");
     }
 
     export function getShortcutCommandsCollection() {

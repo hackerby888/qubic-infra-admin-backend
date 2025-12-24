@@ -12,6 +12,7 @@ import { millisToSeconds } from "../utils/time.js";
 import { lookupIp, type IpInfo } from "../utils/ip.js";
 import { calcGroupIdFromIds } from "../utils/node.js";
 import { hashSHA256 } from "../utils/crypto.js";
+import { MapService } from "../services/map-service.js";
 
 declare global {
     namespace Express {
@@ -2184,7 +2185,48 @@ namespace HttpServer {
                     server: serverHash[s.server] as string,
                     lat: s.ipInfo?.lat || 0,
                     lon: s.ipInfo?.lon || 0,
+                    isBM: false,
                 }));
+
+                let bmNodes = MapService.getBMNodes();
+
+                for (let bmNode of bmNodes) {
+                    if (serverHash[bmNode]) {
+                        continue;
+                    }
+                    if (!serverHash[bmNode]) {
+                        serverHash[bmNode] = await hashSHA256(bmNode);
+                    }
+                    let ipInfo: IpInfo = (await MapService.getIpInfoForServer(
+                        bmNode
+                    )) as IpInfo;
+
+                    if (!ipInfo) {
+                        return;
+                    }
+
+                    responseServers.push({
+                        server: serverHash[bmNode] as string,
+                        lat: ipInfo.lat || 0,
+                        lon: ipInfo.lon || 0,
+                        isBM: true,
+                    });
+                }
+
+                // make sure unique
+                let uniqueServersMap: Record<
+                    string,
+                    {
+                        server: string;
+                        lat: number;
+                        lon: number;
+                        isBM: boolean;
+                    }
+                > = {};
+                responseServers.forEach((s) => {
+                    uniqueServersMap[s.server] = s;
+                });
+                responseServers = Object.values(uniqueServersMap);
                 res.json({ servers: responseServers });
             } catch (error) {
                 logger.error(
@@ -2197,6 +2239,202 @@ namespace HttpServer {
                 });
             }
         });
+
+        app.get(
+            "/cron-jobs",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let cronId = req.query.cronId as string | undefined;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+
+                    let cronJobs = await Mongodb.getCronJobsCollection()
+                        .find(
+                            {
+                                operator: operator,
+                                ...(cronId ? { cronId: cronId } : {}),
+                            },
+                            { projection: { _id: 0 } }
+                        )
+                        .toArray();
+                    res.json({ cronJobs });
+                } catch (error) {
+                    logger.error(
+                        `Error fetching cron jobs: ${(error as Error).message}`
+                    );
+                    res.status(500).json({
+                        error: "Failed to fetch cron jobs " + error,
+                    });
+                }
+            }
+        );
+
+        app.post(
+            "/cron-jobs",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let cronJob: MongoDbTypes.CronJob = req.body;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (
+                        !cronJob ||
+                        !cronJob.command ||
+                        !cronJob.schedule ||
+                        !cronJob.type
+                    ) {
+                        res.status(400).json({
+                            error: "cronJob with command, and schedule are required",
+                        });
+                        return;
+                    }
+
+                    if (cronJob.type === "custom") {
+                        // no support for custom cron syntax yet
+                        return res.status(400).json({
+                            error: "Custom cron syntax is not supported yet",
+                        });
+                    }
+
+                    cronJob.operator = operator;
+                    cronJob.cronId = (
+                        await hashSHA256(
+                            operator +
+                                "-" +
+                                cronJob.name +
+                                "-" +
+                                cronJob.command
+                        )
+                    ).substring(0, 8);
+
+                    Mongodb.getCronJobsCollection()
+                        .updateOne(
+                            { cronId: cronJob.cronId, operator: operator },
+                            { $set: cronJob },
+                            { upsert: true }
+                        )
+                        .then(() => {
+                            res.json({
+                                message:
+                                    "Cron job created/updated successfully",
+                            });
+                        })
+                        .catch((error) => {
+                            logger.error(
+                                `Error creating/updating cron job: ${
+                                    (error as Error).message
+                                }`
+                            );
+                            res.status(500).send({
+                                error:
+                                    "Failed to create/update cron job " + error,
+                            });
+                        });
+                } catch (error) {
+                    res.status(500).send({
+                        error: "Failed to create/update cron job " + error,
+                    });
+                }
+            }
+        );
+
+        app.post(
+            "/cron-jobs/update",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let cronId = req.body.cronId as string;
+                    let updates = req.body
+                        .updates as Partial<MongoDbTypes.CronJob>;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (!cronId || !updates) {
+                        res.status(400).json({
+                            error: "cronId and updates are required",
+                        });
+                        return;
+                    }
+
+                    Mongodb.getCronJobsCollection()
+                        .updateOne(
+                            { cronId: cronId, operator: operator },
+                            { $set: updates }
+                        )
+                        .then(() => {
+                            res.json({
+                                message: "Cron job updated successfully",
+                            });
+                        })
+                        .catch((error) => {
+                            logger.error(
+                                `Error updating cron job: ${
+                                    (error as Error).message
+                                }`
+                            );
+                            res.status(500).send({
+                                error: "Failed to update cron job " + error,
+                            });
+                        });
+                } catch (error) {
+                    res.status(500).send({
+                        error: "Failed to update cron job " + error,
+                    });
+                }
+            }
+        );
+
+        app.delete(
+            "/cron-jobs",
+            MiddleWare.authenticateToken,
+            async (req, res) => {
+                try {
+                    let operator = req.user?.username;
+                    let cronId = req.body.cronId as string;
+                    if (!operator) {
+                        res.status(400).json({ error: "No operator found" });
+                        return;
+                    }
+                    if (!cronId) {
+                        res.status(400).json({
+                            error: "cronId is required",
+                        });
+                        return;
+                    }
+
+                    Mongodb.getCronJobsCollection()
+                        .deleteOne({ cronId: cronId, operator: operator })
+                        .then(() => {
+                            res.json({
+                                message: "Cron job deleted successfully",
+                            });
+                        })
+                        .catch((error) => {
+                            logger.error(
+                                `Error deleting cron job: ${
+                                    (error as Error).message
+                                }`
+                            );
+                            res.status(500).send({
+                                error: "Failed to delete cron job " + error,
+                            });
+                        });
+                } catch (error) {
+                    res.status(500).send({
+                        error: "Failed to delete cron job " + error,
+                    });
+                }
+            }
+        );
 
         let server = app.listen(port, () => {
             logger.info(`HTTP Server is running at http://localhost:${port}`);

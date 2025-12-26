@@ -514,7 +514,8 @@ namespace NodeService {
                         })
                         .toArray();
                     for (let job of operatorCronJobs) {
-                        isOperatorCronJobEnabledMap[job.operator] = true;
+                        isOperatorCronJobEnabledMap[job.operator] =
+                            job.isEnabled;
                     }
 
                     let liteNodes = [..._currentLiteNodes];
@@ -592,7 +593,7 @@ namespace NodeService {
         await pullServerLists();
         watchLiteNodes();
         watchBobNodes();
-        //watchAndSaveSnapshot();
+        watchAndSaveSnapshot();
     }
 }
 

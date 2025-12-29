@@ -943,6 +943,13 @@ namespace HttpServer {
             MiddleWare.authenticateToken,
             async (req, res) => {
                 try {
+                    // check if admin
+                    if (!req.user || req.user.role !== "admin") {
+                        res.status(403).json({
+                            error: "Admin privileges required",
+                        });
+                        return;
+                    }
                     const operators = await Mongodb.getUsersCollection()
                         .find({})
                         .project({ _id: 0, passwordHash: 0 })

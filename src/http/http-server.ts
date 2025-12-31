@@ -235,17 +235,13 @@ namespace HttpServer {
                 }
 
                 // Get server details from DB
-                let serverDocs = await Mongodb.getServersCollection()
-                    .find({
-                        server: { $in: servers },
-                        operator,
-                    })
-                    .toArray();
+                let serverDocs = (
+                    await Mongodb.getServersCollection()
+                        .find({ server: { $in: servers } })
+                        .toArray()
+                ).filter((s) => s.username && s.username.length > 0);
 
-                if (
-                    servers.length === 0 ||
-                    serverDocs.length !== servers.length
-                ) {
+                if (servers.length === 0) {
                     res.status(404).json({
                         error: "No matching servers found in the database",
                     });
@@ -655,13 +651,13 @@ namespace HttpServer {
             // Get server details from DB
             let serverDocs: MongoDbTypes.Server[] = [];
             try {
-                serverDocs = await Mongodb.getServersCollection()
-                    .find({ server: { $in: servers } })
-                    .toArray();
-                if (
-                    serverDocs.length === 0 ||
-                    serverDocs.length !== servers.length
-                ) {
+                serverDocs = (
+                    await Mongodb.getServersCollection()
+                        .find({ server: { $in: servers } })
+                        .toArray()
+                ).filter((s) => s.username && s.username.length > 0);
+
+                if (serverDocs.length === 0) {
                     res.status(404).json({
                         error: "No matching servers found in the database",
                     });

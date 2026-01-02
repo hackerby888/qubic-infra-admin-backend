@@ -593,7 +593,7 @@ namespace NodeService {
         await pullServerLists();
         watchLiteNodes();
         watchBobNodes();
-        watchAndSaveSnapshot();
+        //watchAndSaveSnapshot();
     }
 }
 

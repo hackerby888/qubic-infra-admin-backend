@@ -13,6 +13,8 @@ import { lookupIp, type IpInfo } from "../utils/ip.js";
 import { calcGroupIdFromIds } from "../utils/node.js";
 import { hashSHA256 } from "../utils/crypto.js";
 import { MapService } from "../services/map-service.js";
+import fs from "fs";
+import https from "https";
 
 declare global {
     namespace Express {
@@ -2439,9 +2441,33 @@ namespace HttpServer {
             }
         );
 
-        let server = app.listen(port, () => {
-            logger.info(`HTTP Server is running at http://localhost:${port}`);
-        });
+        // let server = app.listen(port, () => {
+        //     logger.info(`HTTP Server is running at http://localhost:${port}`);
+        // });
+        let server: any;
+        if (process.env.ENV === "production") {
+            logger.info("Starting HTTPS server in production mode");
+            const httpsOptions = {
+                key: fs.readFileSync(
+                    process.env.HTTPS_KEY_PATH || "./certs/key.pem"
+                ),
+                cert: fs.readFileSync(
+                    process.env.HTTPS_CERT_PATH || "./certs/cert.pem"
+                ),
+            };
+            server = https.createServer(httpsOptions, app).listen(port, () => {
+                logger.info(
+                    `HTTPS Server is running at https://localhost:${port}`
+                );
+            });
+        } else {
+            logger.info("Starting HTTP server in development mode");
+            server = app.listen(port, () => {
+                logger.info(
+                    `HTTP Server is running at http://localhost:${port}`
+                );
+            });
+        }
 
         return server;
     }

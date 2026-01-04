@@ -500,24 +500,22 @@ namespace NodeService {
 
         while (true) {
             try {
+                // obtain operator cronjob to see if the save snapshot is enabled
+                let isOperatorCronJobEnabledMap: {
+                    [operator: string]: boolean;
+                } = {};
+                let operatorCronJobs = await Mongodb.getCronJobsCollection()
+                    .find({
+                        command: "auto-save-snapshot",
+                    })
+                    .toArray();
+                for (let job of operatorCronJobs) {
+                    isOperatorCronJobEnabledMap[job.operator] = job.isEnabled;
+                }
                 // select random `numberOfNodesPerSave` nodes from currentPendingNodes
                 let nodesToSave: MongoDbTypes.Server[] = [];
                 if (currentPendingNodes.length <= numberOfNodesPerSave) {
                     // set up
-                    // obtain operator cronjob to see if the save snapshot is enabled
-                    let isOperatorCronJobEnabledMap: {
-                        [operator: string]: boolean;
-                    } = {};
-                    let operatorCronJobs = await Mongodb.getCronJobsCollection()
-                        .find({
-                            command: "auto-save-snapshot",
-                        })
-                        .toArray();
-                    for (let job of operatorCronJobs) {
-                        isOperatorCronJobEnabledMap[job.operator] =
-                            job.isEnabled;
-                    }
-
                     let liteNodes = [..._currentLiteNodes];
                     let liteNodesDbDocs = (await Mongodb.getServersCollection()
                         .find({})
@@ -528,7 +526,7 @@ namespace NodeService {
                             liteNodes.some((ln) => ln.server === doc.server)
                     );
                     liteNodesDbDocs = liteNodesDbDocs.filter(
-                        (doc) => isOperatorCronJobEnabledMap[doc.operator]
+                        (doc) => !!isOperatorCronJobEnabledMap[doc.operator]
                     );
                     numberOfNodesPerSave = Math.ceil(
                         liteNodesDbDocs.length /
@@ -542,43 +540,48 @@ namespace NodeService {
                         let randomIndex = Math.ceil(
                             Math.random() * currentPendingNodes.length
                         );
-                        let lastSaveTick =
-                            lastSaveTickMap[
-                                currentPendingNodes[randomIndex]!.server
-                            ] || 0;
-                        let currentTick =
-                            _status.liteServers[
-                                currentPendingNodes[randomIndex]!.server
-                            ]?.tick || 0;
-                        if (currentTick - lastSaveTick > 676 * 2) {
-                            nodesToSave.push(currentPendingNodes[randomIndex]!);
-                        }
+                        nodesToSave.push(currentPendingNodes[randomIndex]!);
                         currentPendingNodes.splice(randomIndex, 1);
                     }
                 }
 
                 // Save snapshot for selected nodes
                 for (let node of nodesToSave) {
-                    SSHService.executeCommands(
-                        node.server,
-                        node.username,
-                        node.password,
-                        [
-                            `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[19~'`,
-                        ],
-                        60_000,
-                        {
-                            sshPrivateKey: node.sshPrivateKey,
-                        }
-                    )
-                        .then(() => {
-                            logger.info(
-                                `Snapshot command sent to ${node.server}`
-                            );
-                        })
-                        .catch(() => {});
-                    lastSaveTickMap[node.server] =
+                    let lastSaveTick = lastSaveTickMap[node.server] || 0;
+                    let currentTick =
                         _status.liteServers[node.server]?.tick || 0;
+                    if (currentTick - lastSaveTick > 676 * 2) {
+                        if (isOperatorCronJobEnabledMap[node.operator]) {
+                            SSHService.executeCommands(
+                                node.server,
+                                node.username,
+                                node.password,
+                                [
+                                    `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[19~'`,
+                                ],
+                                60_000,
+                                {
+                                    sshPrivateKey: node.sshPrivateKey,
+                                }
+                            )
+                                .then(() => {
+                                    logger.info(
+                                        `Snapshot command sent to ${node.server}`
+                                    );
+                                })
+                                .catch(() => {});
+                            lastSaveTickMap[node.server] =
+                                _status.liteServers[node.server]?.tick || 0;
+                        } else {
+                            logger.info(
+                                `Skipping snapshot for ${node.server}, cron job disabled`
+                            );
+                        }
+                    } else {
+                        logger.info(
+                            `Skipping snapshot for ${node.server}, not enough ticks progressed`
+                        );
+                    }
                 }
                 await sleep(SAVE_INTERVAL);
             } catch (error) {
@@ -593,7 +596,7 @@ namespace NodeService {
         await pullServerLists();
         watchLiteNodes();
         watchBobNodes();
-        //watchAndSaveSnapshot();
+        watchAndSaveSnapshot();
     }
 }
 

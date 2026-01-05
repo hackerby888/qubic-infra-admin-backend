@@ -80,7 +80,22 @@ namespace HttpServer {
 
         app.get("/servers-status", async (req, res) => {
             let operator = req.query.operator as string | undefined;
+            let needPlainIp = req.query.plainIp === "true";
             let statuses = NodeService.getStatus();
+
+            if (needPlainIp) {
+                let token = req.headers["authorization"]?.split(" ")[1];
+                // verify token
+                if (!token) {
+                    return res.status(401).json({ error: "Missing token" });
+                }
+                try {
+                    jwt.verify(token, process.env.JWT_SECRET as string);
+                } catch (err) {
+                    return res.status(403).json({ error: "Invalid token" });
+                }
+            }
+
             if (operator) {
                 // Filter statuses by operator
                 statuses.liteNodes = statuses.liteNodes.filter(
@@ -126,12 +141,16 @@ namespace HttpServer {
             let serverHash: Record<string, string> = {};
             for (let status of statuses.liteNodes) {
                 if (!serverHash[status.server]) {
-                    serverHash[status.server] = await hashSHA256(status.server);
+                    serverHash[status.server] = !needPlainIp
+                        ? await hashSHA256(status.server)
+                        : status.server;
                 }
             }
             for (let status of statuses.bobNodes) {
                 if (!serverHash[status.server]) {
-                    serverHash[status.server] = await hashSHA256(status.server);
+                    serverHash[status.server] = !needPlainIp
+                        ? await hashSHA256(status.server)
+                        : status.server;
                 }
             }
 

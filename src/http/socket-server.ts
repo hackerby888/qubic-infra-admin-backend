@@ -4,6 +4,7 @@ import { Mongodb, MongoDbTypes } from "../database/db.js";
 import { SSHService } from "../services/ssh-service.js";
 import { NodeService } from "../services/node-service.js";
 import { sleep } from "../utils/time.js";
+import WebSocket from "ws";
 
 declare module "socket.io" {
     interface Socket {
@@ -12,12 +13,14 @@ declare module "socket.io" {
         service: MongoDbTypes.ServiceType;
         isSubscribedToLogs: boolean;
         isSubscribedToRealtimeStats: boolean;
+        isSubscribedToBobLogs: boolean;
     }
 }
 
 export namespace SocketServer {
     let io: Server;
     let connectingRealtimeSockets: Set<Socket> = new Set();
+    let connectingBobRealtimeLogSockets: { [key: string]: WebSocket } = {};
 
     async function watchAndbroadcastRealtimeStats() {
         while (true) {
@@ -233,6 +236,59 @@ export namespace SocketServer {
                 }
             });
 
+            ///////////////// Subcribe to Bob Realtime Logs Proxy /////////////////
+            socket.on(
+                "subscribeToBobRealtimeLogs",
+                (data: { bobHost: string; subscribeData: object }) => {
+                    logger.info(
+                        `Socket ${socket.id} subscribed to Bob realtime logs proxy at host: ${data.bobHost}`
+                    );
+                    let ws = new WebSocket(
+                        `ws://${data.bobHost}:40420/ws/logs`
+                    );
+
+                    ws.onopen = () => {
+                        ws.send(JSON.stringify(data.subscribeData));
+                        connectingBobRealtimeLogSockets[socket.id] = ws;
+                        logger.info(
+                            `WebSocket connection established to Bob node at ${data.bobHost} for socket ${socket.id}`
+                        );
+                        socket.isSubscribedToBobLogs = true;
+                    };
+
+                    ws.onmessage = (event) => {
+                        socket.emit("bobRealtimeLogUpdate", event.data);
+                    };
+                    ws.onerror = () => {
+                        logger.error(
+                            `WebSocket error on connection to Bob node at ${data.bobHost} for socket ${socket.id}`
+                        );
+                    };
+                    ws.onclose = () => {
+                        logger.info(
+                            `WebSocket connection closed to Bob node at ${data.bobHost} for socket ${socket.id}`
+                        );
+                        socket.isSubscribedToBobLogs = false;
+                        delete connectingBobRealtimeLogSockets[socket.id];
+                    };
+                }
+            );
+
+            socket.on(
+                "unsubscribeFromBobRealtimeLogs",
+                (data: { bobHost: string; unsubscribeData: object }) => {
+                    logger.info(
+                        `Socket ${socket.id} unsubscribed from Bob realtime logs proxy at host: ${data.bobHost}`
+                    );
+                    // close corresponding WebSocket connections
+                    let ws = connectingBobRealtimeLogSockets[socket.id];
+                    if (ws) {
+                        ws.send(JSON.stringify({ action: "unsubscribeAll" }));
+                        ws.close();
+                    }
+                }
+            );
+
             socket.on("disconnect", () => {
                 // clean up logs stuff
                 if (
@@ -256,6 +312,14 @@ export namespace SocketServer {
                     logger.info(
                         `Socket ${socket.id} disconnected from realtime stats | remaining connections: ${connectingRealtimeSockets.size}`
                     );
+                }
+
+                if (socket.isSubscribedToBobLogs) {
+                    // close corresponding WebSocket connections
+                    let ws = connectingBobRealtimeLogSockets[socket.id];
+                    if (ws) {
+                        ws.close();
+                    }
                 }
             });
         });

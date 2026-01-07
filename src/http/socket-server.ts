@@ -35,8 +35,8 @@ export namespace SocketServer {
                 for (const socket of connectingRealtimeSockets) {
                     let statuses = NodeService.getStatus();
 
-                    if (socket.operator) {
-                        // Filter statuses by operator
+                    if (socket.operator && socket.operator !== "admin") {
+                        // Filter statuses by operator (get all nodes if admin)
                         statuses.liteNodes = statuses.liteNodes.filter(
                             (status) => status.operator === socket.operator
                         );

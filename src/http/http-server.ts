@@ -6,7 +6,7 @@ import { logger } from "../utils/logger.js";
 import jwt from "jsonwebtoken";
 import { Mongodb, MongoDbTypes } from "../database/db.js";
 import { SSHService } from "../services/ssh-service.js";
-import { checkLink } from "../utils/common.js";
+import { checkLink, mongodbOperatorSelection } from "../utils/common.js";
 import { v4 as uuidv4 } from "uuid";
 import { millisToSeconds } from "../utils/time.js";
 import { lookupIp, type IpInfo } from "../utils/ip.js";
@@ -197,12 +197,12 @@ namespace HttpServer {
                     }
                     if (service === MongoDbTypes.ServiceType.LiteNode) {
                         await Mongodb.getLiteNodeCollection().updateOne(
-                            { server: server, operator: operator },
+                            { server: server },
                             { $set: { isPrivate: !!isPrivate } }
                         );
                     } else if (service === MongoDbTypes.ServiceType.BobNode) {
                         await Mongodb.getBobNodeCollection().updateOne(
-                            { server: server, operator: operator },
+                            { server: server },
                             { $set: { isPrivate: !!isPrivate } }
                         );
                     } else {
@@ -1066,7 +1066,7 @@ namespace HttpServer {
                         return;
                     }
                     await Mongodb.getServersCollection().updateOne(
-                        { server: server, operator: operator },
+                        { server: server },
                         { $set: { alias: alias } }
                     );
                     res.json({ message: "Alias updated successfully" });
@@ -1373,7 +1373,7 @@ namespace HttpServer {
                     }
 
                     let servers = await Mongodb.getServersCollection()
-                        .find({ operator: operator })
+                        .find({ operator: mongodbOperatorSelection(operator) })
                         .project({
                             _id: 0,
                             password: 0,
@@ -1413,7 +1413,6 @@ namespace HttpServer {
                         await Mongodb.getServersCollection().findOne(
                             {
                                 server: server,
-                                operator: operator,
                             },
                             {
                                 projection: {
@@ -1462,7 +1461,6 @@ namespace HttpServer {
                         await Mongodb.getServersCollection().findOne(
                             {
                                 server: server,
-                                operator: operator,
                             },
                             {
                                 projection: {
@@ -1510,17 +1508,14 @@ namespace HttpServer {
                     for (let server of servers) {
                         await Mongodb.getServersCollection().deleteOne({
                             server: server,
-                            operator: operator,
                         });
 
                         // Remove all lite/bob nodes associcate with it
                         await Mongodb.getLiteNodeCollection().deleteOne({
                             server: server,
-                            operator: operator,
                         });
                         await Mongodb.getBobNodeCollection().deleteOne({
                             server: server,
-                            operator: operator,
                         });
                     }
                     await NodeService.pullServerLists();

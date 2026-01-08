@@ -81,6 +81,7 @@ namespace HttpServer {
         app.get("/servers-status", async (req, res) => {
             let operator = req.query.operator as string | undefined;
             let needPlainIp = req.query.plainIp === "true";
+            let needAll = req.query.all === "true";
             let statuses = NodeService.getStatus();
 
             if (needPlainIp) {
@@ -96,7 +97,7 @@ namespace HttpServer {
                 }
             }
 
-            if (operator) {
+            if (operator && !needAll) {
                 // Filter statuses by operator
                 statuses.liteNodes = statuses.liteNodes.filter(
                     (status) => status.operator === operator

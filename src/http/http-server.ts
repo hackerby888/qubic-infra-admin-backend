@@ -2506,6 +2506,28 @@ namespace HttpServer {
             }
         });
 
+        app.get("/currenttick", (_, res) => {
+            try {
+                let statuses = NodeService.getStatus();
+                let currentTick = 0;
+                let epoch = 0;
+                for (let node of statuses.liteNodes) {
+                    if (node.tick > currentTick) {
+                        currentTick = node.tick;
+                        epoch = node.epoch;
+                    }
+                }
+                res.json({ tick: currentTick, epoch });
+            } catch (error) {
+                logger.error(
+                    `Error fetching current tick: ${(error as Error).message}`
+                );
+                res.status(500).json({
+                    error: "Failed to fetch current tick " + error,
+                });
+            }
+        });
+
         app.delete(
             "/cron-jobs",
             MiddleWare.authenticateToken,

@@ -2474,6 +2474,38 @@ namespace HttpServer {
             }
         });
 
+        app.get("/checkins", async (req, res) => {
+            try {
+                let type = req.query.type as string | undefined;
+                let operator = req.query.operator as string | undefined;
+                let ipv4 = req.query.ip as string | undefined;
+
+                let query: any = {};
+                if (type) {
+                    query.type = type;
+                }
+                if (operator) {
+                    query.operator = operator;
+                }
+                if (ipv4) {
+                    // support ipv4 partial match
+                    query.ip = { $regex: ipv4 };
+                }
+
+                let checkins = await Mongodb.getCheckinsCollection()
+                    .find(query, { projection: { _id: 0 } })
+                    .toArray();
+                res.json({ checkins });
+            } catch (error) {
+                logger.error(
+                    `Error fetching checkins: ${(error as Error).message}`
+                );
+                res.status(500).json({
+                    error: "Failed to fetch checkins " + error,
+                });
+            }
+        });
+
         app.delete(
             "/cron-jobs",
             MiddleWare.authenticateToken,

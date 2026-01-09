@@ -167,6 +167,10 @@ export namespace Mongodb {
         return db;
     }
 
+    export function getCheckinsCollection() {
+        return getDB().collection<MongoDbTypes.Server>("checkins");
+    }
+
     export function getCronJobsCollection() {
         return getDB().collection<MongoDbTypes.CronJob>("cron_jobs");
     }

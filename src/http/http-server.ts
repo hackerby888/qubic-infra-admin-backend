@@ -16,6 +16,8 @@ import { MapService } from "../services/map-service.js";
 import fs from "fs";
 import https from "https";
 
+const lastCheckinMap: Record<string, number> = {};
+
 declare global {
     namespace Express {
         interface Request {
@@ -2412,6 +2414,65 @@ namespace HttpServer {
                 }
             }
         );
+
+        app.post("/checkin", async (req, res) => {
+            try {
+                let body = req.body;
+                let ip =
+                    req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+                // check if body is object (valid json)
+                if (typeof body !== "object") {
+                    res.status(400).json({ error: "Invalid JSON body" });
+                    return;
+                }
+                if (Array.isArray(body)) {
+                    res.status(400).json({ error: "Invalid JSON body" });
+                    return;
+                }
+                // these field must be exists: type, version, uptime, operator, signature, timestamp
+                const requiredFields = [
+                    "type",
+                    "version",
+                    "uptime",
+                    "operator",
+                    "signature",
+                    "timestamp",
+                ];
+                for (let field of requiredFields) {
+                    if (!(field in body)) {
+                        res.status(400).json({
+                            error: `Missing required field: ${field}`,
+                        });
+                        return;
+                    }
+                }
+                // rate limit: only allow checkin once every 30 minutes per ip+type+operator
+                let rateLimitKey = `${ip}-${body.type}-${body.operator}`;
+                let now = Date.now();
+                if (
+                    lastCheckinMap[rateLimitKey] &&
+                    now - lastCheckinMap[rateLimitKey] < 30 * 60 * 1000
+                ) {
+                    res.status(429).json({
+                        error: "Too many checkins. Please wait before checking in again.",
+                    });
+                    return;
+                }
+                lastCheckinMap[rateLimitKey] = now;
+                // insert to mongodb
+                await Mongodb.getCheckinsCollection().insertOne({
+                    ...body,
+                    ip: ip,
+                    lastCheckinAt: Date.now(),
+                });
+                res.json({ message: "Checkin successful" });
+            } catch (error) {
+                logger.error(`Error in checkin: ${(error as Error).message}`);
+                res.status(500).json({
+                    error: "Failed to checkin " + error,
+                });
+            }
+        });
 
         app.delete(
             "/cron-jobs",

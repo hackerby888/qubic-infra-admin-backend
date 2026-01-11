@@ -1770,7 +1770,6 @@ namespace HttpServer {
                         await Mongodb.getServersCollection()
                             .find({
                                 server: { $in: servers },
-                                operator,
                             })
                             .toArray()
                     ).filter((s) => s.username && s.username.length > 0);

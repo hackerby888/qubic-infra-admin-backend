@@ -344,7 +344,7 @@ export namespace SSHService {
             _isExecutingCommandsMap[host] ||
             Object.keys(_isExecutingCommandsMap).filter(
                 (h) => _isExecutingCommandsMap[h]
-            ).length > 1000
+            ).length > 10
         ) {
             // Wait if there is an ongoing execution for the same host and username
             await new Promise((resolve) => setTimeout(resolve, 100));
@@ -686,8 +686,8 @@ export namespace SSHService {
             sshPrivateKey?: string;
         } = {}
     ) {
-        let startTime = Date.now();
         await _accquireExecutionLock(host);
+        let startTime = Date.now();
 
         let stdouts: {
             // command: output;

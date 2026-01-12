@@ -69,6 +69,7 @@ export namespace MongoDbTypes {
         status: CommandStatus;
         uuid: string;
         duration: number;
+        errorServers?: string[];
     }
 
     export enum ServiceType {

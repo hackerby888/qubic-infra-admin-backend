@@ -1871,6 +1871,46 @@ namespace HttpServer {
                                 );
                             });
                     };
+                    const updateCommandLogStatus = (
+                        status: MongoDbTypes.CommandStatus
+                    ) => {
+                        Mongodb.getCommandLogsCollection()
+                            .updateOne(
+                                { uuid: currentUUID },
+                                {
+                                    $set: { status: status },
+                                }
+                            )
+                            .then()
+                            .catch((error) => {
+                                logger.error(
+                                    `Error updating command log status: ${
+                                        (error as Error).message
+                                    }`
+                                );
+                            });
+                    };
+                    const addErrorServersToCommandLog = async (
+                        errorServers: string[]
+                    ) => {
+                        Mongodb.getCommandLogsCollection()
+                            .updateOne(
+                                { uuid: currentUUID },
+                                {
+                                    $addToSet: {
+                                        errorServers: { $each: errorServers },
+                                    },
+                                }
+                            )
+                            .then()
+                            .catch((error) => {
+                                logger.error(
+                                    `Error adding error servers to command log: ${
+                                        (error as Error).message
+                                    }`
+                                );
+                            });
+                    };
 
                     let commandsToBeExecuted: string[] = [];
                     // if (command in QUICKS_COMMANDS_MAP) {
@@ -1905,6 +1945,8 @@ namespace HttpServer {
                     );
 
                     let commandsExecuted = 0;
+                    let haveAtleastOneError = false;
+                    let errorServersList: string[] = [];
                     for (let serverObject of serverDocs) {
                         SSHService.executeCommands(
                             serverObject.server,
@@ -1916,7 +1958,7 @@ namespace HttpServer {
                                 sshPrivateKey: serverObject.sshPrivateKey,
                             }
                         )
-                            .then(async (result) => {
+                            .then((result) => {
                                 commandsExecuted++;
                                 let isAllDone =
                                     commandsExecuted === serverDocs.length;
@@ -1935,6 +1977,8 @@ namespace HttpServer {
                                         duration: result.duration,
                                     });
                                 } else {
+                                    haveAtleastOneError = true;
+                                    errorServersList.push(serverObject.server);
                                     databaseUpdater({
                                         server: serverObject.server,
                                         stdout: Object.values(
@@ -1949,8 +1993,26 @@ namespace HttpServer {
                                         duration: result.duration,
                                     });
                                 }
+                                return result;
                             })
+                            .then(() => {
+                                // If all done, update the main command log status
+                                if (commandsExecuted === serverDocs.length) {
+                                    updateCommandLogStatus(
+                                        haveAtleastOneError
+                                            ? "failed"
+                                            : "completed"
+                                    );
+                                    if (haveAtleastOneError) {
+                                        addErrorServersToCommandLog(
+                                            errorServersList
+                                        );
+                                    }
+                                }
+                            })
+                            // never reached (just there for future)
                             .catch((error) => {
+                                haveAtleastOneError = true;
                                 commandsExecuted++;
                                 let isAllDone =
                                     commandsExecuted === serverDocs.length;

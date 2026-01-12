@@ -915,7 +915,7 @@ namespace HttpServer {
                             databaseUpdater({
                                 server: server.server,
                                 service: service,
-                                stdout: "",
+                                stdout: (error as Error).message,
                                 stderr: (error as Error).message,
                                 status: "error",
                             });

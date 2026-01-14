@@ -2554,6 +2554,9 @@ namespace HttpServer {
 
                 let checkins = await Mongodb.getCheckinsCollection()
                     .find(query, { projection: { _id: 0 } })
+                    .sort({ timestamp: -1 })
+                    .limit(1000)
+                    .skip(0)
                     .toArray();
                 res.json({ checkins });
             } catch (error) {

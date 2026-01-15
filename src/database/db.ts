@@ -17,6 +17,16 @@ export namespace MongoDbTypes {
         | "restarting";
     export type CommandStatus = "pending" | "completed" | "failed";
 
+    export interface Checkin {
+        type: string;
+        version: string;
+        uptime: number;
+        operator: string;
+        signature: string;
+        timestamp: number;
+        ip: string;
+    }
+
     export interface CronJob {
         operator: string;
         cronId: string;
@@ -169,7 +179,7 @@ export namespace Mongodb {
     }
 
     export function getCheckinsCollection() {
-        return getDB().collection<MongoDbTypes.Server>("checkins");
+        return getDB().collection<MongoDbTypes.Checkin>("checkins");
     }
 
     export function getCronJobsCollection() {

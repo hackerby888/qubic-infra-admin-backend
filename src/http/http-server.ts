@@ -2558,6 +2558,15 @@ namespace HttpServer {
                     .limit(1000)
                     .skip(0)
                     .toArray();
+
+                // reformat ip from db (if ipv6 format, convert to ipv4
+                checkins = checkins.map((checkin) => {
+                    if (checkin.ip && checkin.ip.startsWith("::ffff:")) {
+                        checkin.ip = checkin.ip.replace("::ffff:", "");
+                    }
+                    return checkin;
+                });
+
                 res.json({ checkins });
             } catch (error) {
                 logger.error(

@@ -25,6 +25,7 @@ export namespace MongoDbTypes {
         signature: string;
         timestamp: number;
         ip: string;
+        lastCheckinAt: number;
     }
 
     export interface CronJob {

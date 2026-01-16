@@ -6,17 +6,19 @@ import { logger } from "../utils/logger.js";
 import jwt from "jsonwebtoken";
 import { Mongodb, MongoDbTypes } from "../database/db.js";
 import { SSHService } from "../services/ssh-service.js";
-import { checkLink, mongodbOperatorSelection } from "../utils/common.js";
+import {
+    checkLink,
+    lastCheckinMap,
+    mongodbOperatorSelection,
+} from "../utils/common.js";
 import { v4 as uuidv4 } from "uuid";
-import { millisToSeconds } from "../utils/time.js";
+import { getLastWednesdayTimestamp, millisToSeconds } from "../utils/time.js";
 import { lookupIp, type IpInfo } from "../utils/ip.js";
 import { calcGroupIdFromIds } from "../utils/node.js";
 import { hashSHA256 } from "../utils/crypto.js";
 import { MapService } from "../services/map-service.js";
 import fs from "fs";
 import https from "https";
-
-const lastCheckinMap: Record<string, number> = {};
 
 declare global {
     namespace Express {
@@ -2539,6 +2541,9 @@ namespace HttpServer {
                 let type = req.query.type as string | undefined;
                 let operator = req.query.operator as string | undefined;
                 let ipv4 = req.query.ip as string | undefined;
+                let normalized =
+                    req.query.normalized === "true" ||
+                    req.query.normalized === "1";
 
                 let query: any = {};
                 if (type) {
@@ -2552,12 +2557,68 @@ namespace HttpServer {
                     query.ip = { $regex: ipv4 };
                 }
 
-                let checkins = await Mongodb.getCheckinsCollection()
+                // get last wed at 12:00 utc +0
+                const lastWedTimestamp = getLastWednesdayTimestamp().timestamp;
+
+                if (normalized) {
+                    query.timestamp = { $gte: lastWedTimestamp / 1000 };
+                }
+
+                let checkins = (await Mongodb.getCheckinsCollection()
                     .find(query, { projection: { _id: 0 } })
-                    .sort({ timestamp: -1 })
-                    .limit(1000)
+                    .limit(normalized ? Infinity : 1000)
                     .skip(0)
-                    .toArray();
+                    .toArray()) as MongoDbTypes.Checkin[];
+
+                if (normalized) {
+                    // merge checkins by type+operator+ip, calc total uptime and last checkin
+                    let mergedCheckins: Record<
+                        string,
+                        MongoDbTypes.Checkin & {
+                            totalUptime: number;
+                            firstSeenAt: number;
+                        }
+                    > = {};
+                    for (let checkin of checkins.sort(
+                        (a, b) => a.timestamp - b.timestamp
+                    )) {
+                        let key = `${checkin.type}-${checkin.operator}-${checkin.ip}`;
+                        if (!mergedCheckins[key]) {
+                            mergedCheckins[key] = {
+                                ...checkin,
+                                totalUptime: checkin.uptime,
+                                firstSeenAt: checkin.timestamp * 1000,
+                            };
+                        } else {
+                            // if current uptime is greater than previous uptime, add the difference to totalUptime
+                            if (checkin.uptime >= mergedCheckins[key].uptime) {
+                                mergedCheckins[key].totalUptime +=
+                                    checkin.uptime - mergedCheckins[key].uptime;
+                            } else {
+                                // else, just add the current uptime (node restarted)
+                                mergedCheckins[key].totalUptime +=
+                                    checkin.uptime;
+                            }
+                            // update other fields
+                            mergedCheckins[key].timestamp =
+                                checkin.timestamp * 1000;
+                            mergedCheckins[key].uptime = checkin.uptime;
+                            mergedCheckins[key].lastCheckinAt =
+                                checkin.lastCheckinAt;
+                        }
+                    }
+                    // delete unused fields
+                    const unusedFields = ["uptime"];
+                    for (let key in mergedCheckins) {
+                        for (let field of unusedFields) {
+                            delete (mergedCheckins[key] as any)[field];
+                        }
+                    }
+                    // convert to array
+                    checkins = Object.values(
+                        mergedCheckins
+                    ) as MongoDbTypes.Checkin[];
+                }
 
                 // reformat ip from db (if ipv6 format, convert to ipv4
                 checkins = checkins.map((checkin) => {

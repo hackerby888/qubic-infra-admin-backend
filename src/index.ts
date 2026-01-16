@@ -5,6 +5,11 @@ import { NodeService } from "./services/node-service.js";
 import { Mongodb } from "./database/db.js";
 import { SocketServer } from "./http/socket-server.js";
 import { MapService } from "./services/map-service.js";
+import { lastCheckinMap } from "./utils/common.js";
+import fs from "fs/promises";
+import { logger } from "./utils/logger.js";
+
+const LAST_CHECKIN_MAP_FILE = `${process.cwd()}/data/lastCheckinMap.json`;
 
 function checkEnvVariables() {
     const requiredVars = [
@@ -29,7 +34,41 @@ function checkEnvVariables() {
     });
 }
 
+async function dataSetup() {
+    const dir = `${process.cwd()}/data`;
+    try {
+        await fs.mkdir(dir, { recursive: true });
+    } catch (err: any) {
+        logger.error("❌ Error creating data directory:", err.message);
+    }
+    // load lastCheckinMap from file
+    try {
+        const data = await fs.readFile(LAST_CHECKIN_MAP_FILE, "utf-8");
+        const parsedMap: Record<string, number> = JSON.parse(data);
+        Object.assign(lastCheckinMap, parsedMap);
+        logger.info("💾 lastCheckinMap loaded.");
+    } catch (err) {
+        logger.info("No existing lastCheckinMap found, starting fresh.");
+    }
+}
+
+// catch when crash/shutdown/restart
+process.on("SIGINT", async () => {
+    try {
+        await fs.writeFile(
+            LAST_CHECKIN_MAP_FILE,
+            JSON.stringify(lastCheckinMap, null, 2)
+        );
+        logger.info("💾 lastCheckinMap saved.");
+    } catch (err: any) {
+        logger.error("❌ Error saving lastCheckinMap:", err.message);
+    }
+    logger.info("👋 Shutting down...");
+    process.exit(0);
+});
+
 async function main() {
+    await dataSetup();
     checkEnvVariables();
     await Mongodb.connectDB();
     await MapService.start();

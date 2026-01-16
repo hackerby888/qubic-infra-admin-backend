@@ -1,3 +1,5 @@
+export const lastCheckinMap: Record<string, number> = {};
+
 // Convert server string (eg. "127.0.0.1@root 128.0.0.1@root" to ["127.0.0.1", "128.0.0.1"])
 export function convertServersListStringToArray(serversString: string) {
     let servers = serversString.split(" ");

@@ -2544,6 +2544,7 @@ namespace HttpServer {
                 let normalized =
                     req.query.normalized === "true" ||
                     req.query.normalized === "1";
+                let epoch = parseInt(req.query.epoch as string) || 0;
 
                 let query: any = {};
                 if (type) {
@@ -2557,11 +2558,35 @@ namespace HttpServer {
                     query.ip = { $regex: ipv4 };
                 }
 
-                // get last wed at 12:00 utc +0
-                const lastWedTimestamp = getLastWednesdayTimestamp().timestamp;
+                let networkStatus = NodeService.getNetworkStatus();
+                if (epoch === 0) {
+                    epoch = networkStatus.epoch;
+                }
+
+                if (epoch > networkStatus.epoch) {
+                    res.status(400).json({
+                        error: `Invalid epoch number, ${epoch} > ${networkStatus.epoch}`,
+                    });
+                    return;
+                }
+
+                const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+                let lastWedTimestamp = getLastWednesdayTimestamp().timestamp;
+                let nextWedTimestamp = 0;
+                if (networkStatus.epoch > epoch) {
+                    lastWedTimestamp -=
+                        (networkStatus.epoch - epoch) * ONE_WEEK_MS;
+                    nextWedTimestamp = lastWedTimestamp + ONE_WEEK_MS;
+                } else {
+                    // current time cause we are in the same epoch (not ended yet)
+                    nextWedTimestamp = new Date().getTime();
+                }
 
                 if (normalized) {
-                    query.timestamp = { $gte: lastWedTimestamp / 1000 };
+                    query.lastCheckinAt = {
+                        $gte: lastWedTimestamp,
+                        $lt: nextWedTimestamp,
+                    };
                 }
 
                 let checkins = (await Mongodb.getCheckinsCollection()
@@ -2641,16 +2666,8 @@ namespace HttpServer {
 
         app.get("/currenttick", (_, res) => {
             try {
-                let statuses = NodeService.getStatus();
-                let currentTick = 0;
-                let epoch = 0;
-                for (let node of statuses.liteNodes) {
-                    if (node.tick > currentTick) {
-                        currentTick = node.tick;
-                        epoch = node.epoch;
-                    }
-                }
-                res.json({ tick: currentTick, epoch });
+                let { tick, epoch } = NodeService.getNetworkStatus();
+                res.json({ tick, epoch });
             } catch (error) {
                 logger.error(
                     `Error fetching current tick: ${(error as Error).message}`

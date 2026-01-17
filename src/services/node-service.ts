@@ -159,6 +159,19 @@ namespace NodeService {
         return statuses;
     }
 
+    export function getNetworkStatus() {
+        let statuses = NodeService.getStatus();
+        let currentTick = 0;
+        let epoch = 0;
+        for (let node of statuses.liteNodes) {
+            if (node.tick > currentTick) {
+                currentTick = node.tick;
+                epoch = node.epoch;
+            }
+        }
+        return { tick: currentTick, epoch };
+    }
+
     export async function tryGetIdsFromLiteNode(
         server: string
     ): Promise<string[]> {

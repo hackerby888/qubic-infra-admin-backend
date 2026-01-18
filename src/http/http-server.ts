@@ -2545,14 +2545,22 @@ namespace HttpServer {
                     req.query.normalized === "true" ||
                     req.query.normalized === "1";
                 let epoch = parseInt(req.query.epoch as string) || 0;
+                let excludeDefaultOp = req.query.excludeDefaultOp === "true";
 
                 let query: any = {};
+
+                if (excludeDefaultOp) {
+                    query.operator = {
+                        $ne: "BZBQFLLBNCXEMGLOBHUVFTLUPLVCPQUASSILFABOFFBCADQSSUPNWLZBQEXK",
+                    };
+                } else if (operator) {
+                    query.operator = operator;
+                }
+
                 if (type) {
                     query.type = type;
                 }
-                if (operator) {
-                    query.operator = operator;
-                }
+
                 if (ipv4) {
                     // support ipv4 partial match
                     query.ip = { $regex: ipv4 };

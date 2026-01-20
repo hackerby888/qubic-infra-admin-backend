@@ -60,6 +60,8 @@ export namespace SSHService {
         "spam-qu-threshold": 100,
     };
 
+    let sshPortCache: { [key: string]: number } = {};
+
     let _isExecutingCommandsMap: {
         [key: string]: boolean;
     } = {};
@@ -686,9 +688,6 @@ export namespace SSHService {
             sshPrivateKey?: string;
         } = {}
     ) {
-        await _accquireExecutionLock(host);
-        let startTime = Date.now();
-
         let stdouts: {
             // command: output;
             [key: string]: string;
@@ -698,6 +697,30 @@ export namespace SSHService {
             [key: string]: string;
         } = {};
         let isSuccess = false;
+
+        let port = 22;
+        try {
+            if (sshPortCache[host]) {
+                port = sshPortCache[host];
+            } else {
+                const currentServer =
+                    await Mongodb.getServersCollection().findOne({
+                        server: host,
+                    });
+                if (currentServer) {
+                    port = currentServer.sshPort || port;
+                }
+                sshPortCache[host] = port;
+            }
+        } catch (error) {
+            stderrs["shell"] = `Failed to get server SSH port from database: ${
+                (error as Error).message
+            }`;
+            return { stdouts, stderrs, isSuccess, duration: 0 };
+        }
+
+        await _accquireExecutionLock(host);
+        let startTime = Date.now();
 
         commands.unshift("exec 2>&1"); // Redirect stderr to stdout
         commands.filter((cmd) => cmd && !cmd.trim().startsWith("#"));

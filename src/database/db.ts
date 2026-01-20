@@ -91,6 +91,7 @@ export namespace MongoDbTypes {
 
     export interface Server {
         server: string;
+        sshPort?: number; // default to 22
         ipInfo?: IpInfo;
         alias?: string;
         operator: string;

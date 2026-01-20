@@ -1095,6 +1095,7 @@ namespace HttpServer {
                 let body: {
                     servers: {
                         ip: string;
+                        sshPort?: number;
                         username: string;
                         password: string;
                         services: {
@@ -1149,6 +1150,7 @@ namespace HttpServer {
                     serversData.map((server) => {
                         return {
                             server: server.ip,
+                            sshPort: server.sshPort || 22,
                             ipInfo: ipInfos[server.ip]!,
                             operator: operator as string,
                             sshPrivateKey: userSshKey,

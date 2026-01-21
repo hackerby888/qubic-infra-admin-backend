@@ -1,5 +1,11 @@
 # Note: This script can't be run in interactive session because apt will lock the stdin cause missing commands
 
+# General
+
+export DEBIAN_FRONTEND=noninteractive
+sudo apt-get update -y && sudo apt-get install -y curl gnupg2 iptables nftables
+sudo apt-get install -y --no-install-recommends apt-utils
+
 # Lite
 
 sudo apt update -y && sudo apt upgrade -y

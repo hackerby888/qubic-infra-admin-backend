@@ -341,6 +341,23 @@ export namespace SSHService {
         ram: `free -h | grep Mem | awk '{print $2}'`,
     };
 
+    export async function _getServerSSHPort(host: string) {
+        let port = 22;
+        if (sshPortCache[host]) {
+            port = sshPortCache[host];
+        } else {
+            const currentServer = await Mongodb.getServersCollection().findOne({
+                server: host,
+            });
+            if (currentServer) {
+                port = currentServer.sshPort || port;
+            }
+            sshPortCache[host] = port;
+            logger.info(`Fetched SSH port for ${host} from database: ${port}`);
+        }
+        return port;
+    }
+
     export async function _accquireExecutionLock(host: string) {
         while (
             _isExecutingCommandsMap[host] ||
@@ -698,20 +715,9 @@ export namespace SSHService {
         } = {};
         let isSuccess = false;
 
-        let port = 22;
+        let port;
         try {
-            if (sshPortCache[host]) {
-                port = sshPortCache[host];
-            } else {
-                const currentServer =
-                    await Mongodb.getServersCollection().findOne({
-                        server: host,
-                    });
-                if (currentServer) {
-                    port = currentServer.sshPort || port;
-                }
-                sshPortCache[host] = port;
-            }
+            port = await _getServerSSHPort(host);
         } catch (error) {
             stderrs["shell"] = `Failed to get server SSH port from database: ${
                 (error as Error).message
@@ -859,7 +865,7 @@ export namespace SSHService {
 
             conn.connect({
                 host: host,
-                port: 22,
+                port: port,
                 username: username,
                 password: password,
                 privateKey: (extraData?.sshPrivateKey || "").replace(
@@ -925,6 +931,17 @@ export namespace SSHService {
         remoteFilePath: string,
         sshPrivateKey: string
     ) {
+        let port;
+        try {
+            port = await _getServerSSHPort(host);
+        } catch (error) {
+            return {
+                isSuccess: false,
+                errorMessage: `Failed to get server SSH port from database: ${
+                    (error as Error).message
+                }`,
+            };
+        }
         return new Promise<{ isSuccess: boolean; errorMessage?: string }>(
             (resolve) => {
                 const conn = new Client();
@@ -958,7 +975,7 @@ export namespace SSHService {
                     })
                     .connect({
                         host: host,
-                        port: 22,
+                        port: port,
                         username: username,
                         password: password,
                         privateKey: sshPrivateKey.replace(/\\n/g, "\n"),

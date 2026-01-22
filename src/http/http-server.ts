@@ -265,7 +265,12 @@ namespace HttpServer {
                     await Mongodb.getServersCollection()
                         .find({ server: { $in: servers } })
                         .toArray()
-                ).filter((s) => s.username && s.username.length > 0);
+                ).filter(
+                    (s) =>
+                        s.username &&
+                        s.username.length > 0 &&
+                        s.status === "active"
+                );
 
                 if (servers.length === 0) {
                     res.status(404).json({
@@ -813,6 +818,7 @@ namespace HttpServer {
                 for (let server of serverDocs) {
                     if (!server.services.includes(service)) continue;
                     if (!server.username) continue;
+                    if (server.status !== "active") continue;
                     SSHService.deployNode(
                         server.server,
                         server!.username,
@@ -1775,7 +1781,12 @@ namespace HttpServer {
                                 server: { $in: servers },
                             })
                             .toArray()
-                    ).filter((s) => s.username && s.username.length > 0);
+                    ).filter(
+                        (s) =>
+                            s.username &&
+                            s.username.length > 0 &&
+                            s.status === "active"
+                    );
                     servers = serverDocs.map((s) => s.server);
 
                     if (serverDocs.length === 0) {

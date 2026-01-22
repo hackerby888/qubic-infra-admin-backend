@@ -2592,12 +2592,10 @@ namespace HttpServer {
                     nextWedTimestamp = new Date().getTime();
                 }
 
-                if (normalized) {
-                    query.lastCheckinAt = {
-                        $gte: lastWedTimestamp,
-                        $lt: nextWedTimestamp,
-                    };
-                }
+                query.lastCheckinAt = {
+                    $gte: lastWedTimestamp,
+                    $lt: nextWedTimestamp,
+                };
 
                 let checkins = (await Mongodb.getCheckinsCollection()
                     .find(query, { projection: { _id: 0 } })
@@ -2621,7 +2619,7 @@ namespace HttpServer {
                         if (!mergedCheckins[key]) {
                             mergedCheckins[key] = {
                                 ...checkin,
-                                totalUptime: checkin.uptime,
+                                totalUptime: 0,
                                 firstSeenAt: checkin.timestamp * 1000,
                             };
                         } else {

@@ -38,6 +38,7 @@ namespace NodeService {
         initialTick: number;
         lastUpdated: number;
         lastTickChanged: number;
+        bobVersion: string;
         isPrivate?: boolean;
     }
 
@@ -102,7 +103,9 @@ namespace NodeService {
         }
     }
 
-    async function getBobNodeTickInfo(server: string) {
+    async function getBobNodeTickInfo(
+        server: string
+    ): Promise<BobNodeTickInfo> {
         const url = `http://${server}:${DEFAULT_BOB_NODE_HTTP_PORT}/status`;
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 1000);
@@ -121,6 +124,8 @@ namespace NodeService {
             return data;
         } catch (error) {
             return {
+                operator: "",
+                ipInfo: {},
                 currentProcessingEpoch: -1,
                 currentFetchingTick: -1,
                 currentFetchingLogTick: -1,
@@ -129,6 +134,7 @@ namespace NodeService {
                 initialTick: -1,
                 lastUpdated: -1,
                 lastTickChanged: -1,
+                bobVersion: "",
             };
         }
     }
@@ -334,6 +340,7 @@ namespace NodeService {
                             oldTick !== tickInfo.currentFetchingTick
                                 ? Date.now()
                                 : serverObject?.lastTickChanged || -1,
+                        bobVersion: tickInfo.bobVersion || "unknown",
                     };
                 }
             });

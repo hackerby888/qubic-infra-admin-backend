@@ -40,7 +40,7 @@ export function setupRoutes(app: express.Application) {
     app.use("/", monitoringRoutes);
     
     // Automation (cron jobs)
-    app.use("/cron-jobs", automationRoutes);
+    app.use("/", automationRoutes);
     
     // Map
     app.use("/", mapRoutes);

@@ -14,34 +14,34 @@ import mapRoutes from "./map.routes.js";
 export function setupRoutes(app: express.Application) {
     // Health check
     app.use("/", healthRoutes);
-    
+
     // Authentication
     app.use("/", authRoutes);
-    
+
     // Users management
     app.use("/", usersRoutes);
-    
+
     // Servers management
     app.use("/", serversRoutes);
-    
+
     // Deployment
     app.use("/", deploymentRoutes);
-    
+
     // Commands
-    app.use("/command", commandsRoutes);
-    
+    app.use("/", commandsRoutes);
+
     // Logs
     app.use("/", logsRoutes);
-    
+
     // Nodes
     app.use("/", nodesRoutes);
-    
+
     // Monitoring
     app.use("/", monitoringRoutes);
-    
+
     // Automation (cron jobs)
     app.use("/", automationRoutes);
-    
+
     // Map
     app.use("/", mapRoutes);
 }

@@ -375,7 +375,7 @@ router.post(
                 res.status(400).json({ error: "No operator found" });
                 return;
             }
-            if (!server) {
+            if (!servers) {
                 res.status(400).json({ error: "No server specified" });
                 return;
             }

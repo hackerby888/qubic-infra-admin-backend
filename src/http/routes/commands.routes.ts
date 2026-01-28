@@ -91,7 +91,7 @@ router.post("/", authenticateToken, async (req, res) => {
                 });
         };
 
-        const updateNodeDeloyStatusToDb = ({
+        const updateNodeDeployStatusToDb = ({
             server,
             service,
             status,
@@ -164,7 +164,7 @@ router.post("/", authenticateToken, async (req, res) => {
                                                 : "pending",
                                         duration: duration,
                                     });
-                                    updateNodeDeloyStatusToDb({
+                                    updateNodeDeployStatusToDb({
                                         server: serverObject.server,
                                         service: service,
                                         status: "stopped",
@@ -180,7 +180,7 @@ router.post("/", authenticateToken, async (req, res) => {
                                         status: "failed",
                                         duration: duration,
                                     });
-                                    updateNodeDeloyStatusToDb({
+                                    updateNodeDeployStatusToDb({
                                         server: serverObject.server,
                                         service: service,
                                         status: "error",
@@ -195,7 +195,7 @@ router.post("/", authenticateToken, async (req, res) => {
                                 status: "failed",
                                 duration: 0,
                             });
-                            updateNodeDeloyStatusToDb({
+                            updateNodeDeployStatusToDb({
                                 server: serverObject.server,
                                 service: service,
                                 status: "error",
@@ -210,7 +210,7 @@ router.post("/", authenticateToken, async (req, res) => {
                         totalCommandsExecuted++;
                         continue;
                     }
-                    updateNodeDeloyStatusToDb({
+                    updateNodeDeployStatusToDb({
                         server: serverObject.server,
                         service: service,
                         status: "restarting",
@@ -252,7 +252,7 @@ router.post("/", authenticateToken, async (req, res) => {
                                                 : "pending",
                                         duration: duration,
                                     });
-                                    updateNodeDeloyStatusToDb({
+                                    updateNodeDeployStatusToDb({
                                         server: serverObject.server,
                                         service: service,
                                         status: "active",
@@ -271,7 +271,7 @@ router.post("/", authenticateToken, async (req, res) => {
                                         status: "failed",
                                         duration: duration,
                                     });
-                                    updateNodeDeloyStatusToDb({
+                                    updateNodeDeployStatusToDb({
                                         server: serverObject.server,
                                         service: service,
                                         status: "error",
@@ -286,7 +286,7 @@ router.post("/", authenticateToken, async (req, res) => {
                                 status: "failed",
                                 duration: 0,
                             });
-                            updateNodeDeloyStatusToDb({
+                            updateNodeDeployStatusToDb({
                                 server: serverObject.server,
                                 service: service,
                                 status: "error",

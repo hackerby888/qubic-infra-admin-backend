@@ -43,7 +43,7 @@ router.post("/server-info-for-map", async (req, res) => {
             )) as IpInfo;
 
             if (!ipInfo) {
-                return;
+                continue;
             }
 
             responseServers.push({

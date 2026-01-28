@@ -385,7 +385,7 @@ router.post(
                     server: server,
                 });
 
-                // Remove all lite/bob nodes associcate with it
+                // Remove all lite/bob nodes associated with it
                 await Mongodb.getLiteNodeCollection().deleteOne({
                     server: server,
                 });

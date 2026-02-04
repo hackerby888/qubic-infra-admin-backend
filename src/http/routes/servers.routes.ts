@@ -12,8 +12,7 @@ import { NodeService } from "../../services/node-service.js";
 const router = express.Router();
 
 router.get("/servers", (req, res) => {
-    let servers: string[] =
-        GithubService.getVariable("SERVERS").split(" ");
+    let servers: string[] = GithubService.getVariable("SERVERS").split(" ");
     for (let i = 0; i < servers.length; i++) {
         if (!servers[i]) continue;
 
@@ -23,248 +22,192 @@ router.get("/servers", (req, res) => {
     res.json({ servers });
 });
 
-router.post(
-    "/set-server-alias",
-    authenticateToken,
-    async (req, res) => {
-        try {
-            let { server, alias } = req.body;
-            let operator = req.user?.username;
-            if (!operator) {
-                res.status(400).json({ error: "No operator found" });
-                return;
-            }
-            await Mongodb.getServersCollection().updateOne(
-                { server: server },
-                { $set: { alias: alias } }
-            );
-            res.json({ message: "Alias updated successfully" });
-        } catch (error) {
-            logger.error(
-                `Error setting server alias: ${
-                    (error as Error).message
-                }`
-            );
-            res.status(500).json({
-                error: "Internal server error" + error,
-            });
-        }
-    }
-);
-
-router.post(
-    "/new-servers",
-    authenticateToken,
-    async (req, res) => {
-        let body: {
-            servers: {
-                ip: string;
-                sshPort?: number;
-                username: string;
-                password: string;
-                services: {
-                    liteNode: boolean;
-                    bobNode: boolean;
-                };
-            }[];
-            authType: "password" | "sshKey" | "tracking";
-        } = req.body;
-        let { servers: serversData, authType } = body;
+router.post("/set-server-alias", authenticateToken, async (req, res) => {
+    try {
+        let { server, alias } = req.body;
         let operator = req.user?.username;
         if (!operator) {
-            res.status(400).json({
-                error: "No operator found",
-            });
+            res.status(400).json({ error: "No operator found" });
             return;
         }
+        await Mongodb.getServersCollection().updateOne(
+            { server: server },
+            { $set: { alias: alias } }
+        );
+        res.json({ message: "Alias updated successfully" });
+    } catch (error) {
+        logger.error(`Error setting server alias: ${(error as Error).message}`);
+        res.status(500).json({
+            error: "Internal server error" + error,
+        });
+    }
+});
 
-        let ipInfos: {
-            [key: string]: IpInfo;
-        } = {};
+router.post("/new-servers", authenticateToken, async (req, res) => {
+    let body: {
+        servers: {
+            ip: string;
+            sshPort?: number;
+            username: string;
+            password: string;
+            services: {
+                liteNode: boolean;
+                bobNode: boolean;
+            };
+        }[];
+        authType: "password" | "sshKey" | "tracking";
+    } = req.body;
+    let { servers: serversData, authType } = body;
+    let operator = req.user?.username;
+    if (!operator) {
+        res.status(400).json({
+            error: "No operator found",
+        });
+        return;
+    }
 
-        for (let server of serversData) {
-            ipInfos[server.ip] = await lookupIp(server.ip);
-        }
+    let ipInfos: {
+        [key: string]: IpInfo;
+    } = {};
 
-        let userSshKey = "";
-        try {
-            // Obtain current user ssh key if auth type is sshKey
-            if (authType === "sshKey") {
-                let userDoc =
-                    await Mongodb.getUsersCollection().findOne({
-                        username: operator,
-                    });
-                if (userDoc && userDoc?.currentsshPrivateKey) {
-                    userSshKey = userDoc.currentsshPrivateKey;
-                } else {
-                    res.status(400).json({
-                        error: "No SSH key found for user",
-                    });
-                    return;
-                }
+    for (let server of serversData) {
+        ipInfos[server.ip] = await lookupIp(server.ip);
+    }
+
+    let userSshKey = "";
+    try {
+        // Obtain current user ssh key if auth type is sshKey
+        if (authType === "sshKey") {
+            let userDoc = await Mongodb.getUsersCollection().findOne({
+                username: operator,
+            });
+            if (userDoc && userDoc?.currentsshPrivateKey) {
+                userSshKey = userDoc.currentsshPrivateKey;
+            } else {
+                res.status(400).json({
+                    error: "No SSH key found for user",
+                });
+                return;
             }
-        } catch (error) {
-            res.json({
-                error: "Error fetching user ssh key " + error,
-            });
-            return;
+        }
+    } catch (error) {
+        res.json({
+            error: "Error fetching user ssh key " + error,
+        });
+        return;
+    }
+
+    let serversDataNormalized: MongoDbTypes.Server[] = serversData.map(
+        (server) => {
+            return {
+                server: server.ip,
+                sshPort: server.sshPort || 22,
+                ipInfo: ipInfos[server.ip]!,
+                operator: operator as string,
+                sshPrivateKey: userSshKey,
+                username: server.username,
+                password: server.password,
+                services: [
+                    server.services.liteNode
+                        ? MongoDbTypes.ServiceType.LiteNode
+                        : MongoDbTypes.ServiceType.null,
+                    server.services.bobNode
+                        ? MongoDbTypes.ServiceType.BobNode
+                        : MongoDbTypes.ServiceType.null,
+                ].filter((s) => s !== "null") as MongoDbTypes.ServiceType[],
+                status: authType === "tracking" ? "active" : "setting_up",
+            };
+        }
+    );
+
+    try {
+        let currentServers = await Mongodb.getServersCollection()
+            .find({})
+            .project({ _id: 0, server: 1 })
+            .toArray();
+
+        // Check if one of the servers already exists
+        for (let serverData of serversDataNormalized) {
+            if (currentServers.find((s) => s.server === serverData.server)) {
+                res.status(400).json({
+                    error: `Server ${serverData.server} already exists`,
+                });
+                return;
+            }
         }
 
-        let serversDataNormalized: MongoDbTypes.Server[] =
-            serversData.map((server) => {
-                return {
-                    server: server.ip,
-                    sshPort: server.sshPort || 22,
-                    ipInfo: ipInfos[server.ip]!,
-                    operator: operator as string,
-                    sshPrivateKey: userSshKey,
-                    username: server.username,
-                    password: server.password,
-                    services: [
-                        server.services.liteNode
-                            ? MongoDbTypes.ServiceType.LiteNode
-                            : MongoDbTypes.ServiceType.null,
-                        server.services.bobNode
-                            ? MongoDbTypes.ServiceType.BobNode
-                            : MongoDbTypes.ServiceType.null,
-                    ].filter(
-                        (s) => s !== "null"
-                    ) as MongoDbTypes.ServiceType[],
-                    status:
-                        authType === "tracking"
-                            ? "active"
-                            : "setting_up",
-                };
-            });
+        // Insert new servers into DB
+        await Mongodb.getServersCollection().insertMany(serversDataNormalized);
 
-        try {
-            let currentServers = await Mongodb.getServersCollection()
-                .find({})
-                .project({ _id: 0, server: 1 })
-                .toArray();
-
-            // Check if one of the servers already exists
+        if (authType !== "tracking") {
+            // Do set up for servers
             for (let serverData of serversDataNormalized) {
-                if (
-                    currentServers.find(
-                        (s) => s.server === serverData.server
-                    )
-                ) {
-                    res.status(400).json({
-                        error: `Server ${serverData.server} already exists`,
-                    });
-                    return;
-                }
-            }
-
-            // Insert new servers into DB
-            await Mongodb.getServersCollection().insertMany(
-                serversDataNormalized
-            );
-
-            if (authType !== "tracking") {
-                // Do set up for servers
-                for (let serverData of serversDataNormalized) {
-                    SSHService.setupNode(
-                        serverData.server,
-                        serverData.username,
-                        serverData.password,
-                        serverData.sshPrivateKey
-                    )
-                        .then(async (result) => {
-                            if (result.isSuccess) {
-                                Mongodb.getServersCollection()
-                                    .updateOne(
-                                        { server: serverData.server },
-                                        {
-                                            $set: {
-                                                cpu: result.cpu,
-                                                os: result.os,
-                                                ram: result.ram,
-                                                status: "active",
-                                                setupLogs: {
-                                                    stdout:
-                                                        `---------- Time elapsed ${millisToSeconds(
-                                                            result.duration
-                                                        )} seconds ----------- \n\n` +
-                                                        Object.values(
-                                                            result.stdouts
-                                                        ).join("\n"),
-                                                    stderr: Object.values(
-                                                        result.stderrs
+                SSHService.setupNode(
+                    serverData.server,
+                    serverData.username,
+                    serverData.password,
+                    serverData.sshPrivateKey
+                )
+                    .then(async (result) => {
+                        if (result.isSuccess) {
+                            Mongodb.getServersCollection()
+                                .updateOne(
+                                    { server: serverData.server },
+                                    {
+                                        $set: {
+                                            cpu: result.cpu,
+                                            os: result.os,
+                                            ram: result.ram,
+                                            status: "active",
+                                            setupLogs: {
+                                                stdout:
+                                                    `---------- Time elapsed ${millisToSeconds(
+                                                        result.duration
+                                                    )} seconds ----------- \n\n` +
+                                                    Object.values(
+                                                        result.stdouts
                                                     ).join("\n"),
-                                                },
+                                                stderr: Object.values(
+                                                    result.stderrs
+                                                ).join("\n"),
                                             },
-                                        }
-                                    )
-                                    .then()
-                                    .catch((_) => {});
-
-                                try {
-                                    if (
-                                        serverData.services.includes(
-                                            MongoDbTypes.ServiceType
-                                                .LiteNode
-                                        )
-                                    ) {
-                                        await Mongodb.getLiteNodeCollection()
-                                            .insertOne({
-                                                server: serverData.server,
-                                                operator:
-                                                    operator as string,
-                                                isPrivate: false,
-                                            })
-                                            .catch((_) => {});
+                                        },
                                     }
+                                )
+                                .then()
+                                .catch((_) => {});
 
-                                    if (
-                                        serverData.services.includes(
-                                            MongoDbTypes.ServiceType
-                                                .BobNode
-                                        )
-                                    ) {
-                                        await Mongodb.getBobNodeCollection()
-                                            .insertOne({
-                                                server: serverData.server,
-                                                operator:
-                                                    operator as string,
-                                                isPrivate: false,
-                                            })
-                                            .catch((_) => {});
-                                    }
-                                    await NodeService.pullServerLists();
-                                } catch (error) {}
-                            } else {
-                                Mongodb.getServersCollection()
-                                    .updateOne(
-                                        { server: serverData.server },
-                                        {
-                                            $set: {
-                                                status: "error",
-                                                setupLogs: {
-                                                    stdout:
-                                                        `---------- Time elapsed ${millisToSeconds(
-                                                            result.duration
-                                                        )} seconds ----------- \n\n` +
-                                                        Object.values(
-                                                            result.stdouts
-                                                        ).join("\n"),
-                                                    stderr:
-                                                        `---------- Time elapsed ${millisToSeconds(
-                                                            result.duration
-                                                        )} seconds ----------- \n\n` +
-                                                        Object.values(
-                                                            result.stderrs
-                                                        ).join("\n"),
-                                                },
-                                            },
-                                        }
+                            try {
+                                if (
+                                    serverData.services.includes(
+                                        MongoDbTypes.ServiceType.LiteNode
                                     )
-                                    .then()
-                                    .catch((_) => {});
-                            }
-                        })
-                        .catch((error) => {
+                                ) {
+                                    await Mongodb.getLiteNodeCollection()
+                                        .insertOne({
+                                            server: serverData.server,
+                                            operator: operator as string,
+                                            isPrivate: false,
+                                        })
+                                        .catch((_) => {});
+                                }
+
+                                if (
+                                    serverData.services.includes(
+                                        MongoDbTypes.ServiceType.BobNode
+                                    )
+                                ) {
+                                    await Mongodb.getBobNodeCollection()
+                                        .insertOne({
+                                            server: serverData.server,
+                                            operator: operator as string,
+                                            isPrivate: false,
+                                        })
+                                        .catch((_) => {});
+                                }
+                                await NodeService.pullServerLists();
+                            } catch (error) {}
+                        } else {
                             Mongodb.getServersCollection()
                                 .updateOne(
                                     { server: serverData.server },
@@ -272,135 +215,214 @@ router.post(
                                         $set: {
                                             status: "error",
                                             setupLogs: {
-                                                stdout: (error as Error)
-                                                    .message,
-                                                stderr: (error as Error)
-                                                    .message,
+                                                stdout:
+                                                    `---------- Time elapsed ${millisToSeconds(
+                                                        result.duration
+                                                    )} seconds ----------- \n\n` +
+                                                    Object.values(
+                                                        result.stdouts
+                                                    ).join("\n"),
+                                                stderr:
+                                                    `---------- Time elapsed ${millisToSeconds(
+                                                        result.duration
+                                                    )} seconds ----------- \n\n` +
+                                                    Object.values(
+                                                        result.stderrs
+                                                    ).join("\n"),
                                             },
                                         },
                                     }
                                 )
                                 .then()
-                                .catch(() => {});
-                        });
-                }
-            } else {
-                for (let serverData of serversDataNormalized) {
-                    try {
-                        if (
-                            serverData.services.includes(
-                                MongoDbTypes.ServiceType.LiteNode
-                            )
-                        ) {
-                            await Mongodb.getLiteNodeCollection()
-                                .insertOne({
-                                    server: serverData.server,
-                                    operator: operator as string,
-                                    isPrivate: false,
-                                })
                                 .catch((_) => {});
                         }
-
-                        if (
-                            serverData.services.includes(
-                                MongoDbTypes.ServiceType.BobNode
+                    })
+                    .catch((error) => {
+                        Mongodb.getServersCollection()
+                            .updateOne(
+                                { server: serverData.server },
+                                {
+                                    $set: {
+                                        status: "error",
+                                        setupLogs: {
+                                            stdout: (error as Error).message,
+                                            stderr: (error as Error).message,
+                                        },
+                                    },
+                                }
                             )
-                        ) {
-                            await Mongodb.getBobNodeCollection()
-                                .insertOne({
-                                    server: serverData.server,
-                                    operator: operator as string,
-                                    isPrivate: false,
-                                })
-                                .catch((_) => {});
-                        }
-                        await NodeService.pullServerLists();
-                    } catch (error) {}
-                }
+                            .then()
+                            .catch(() => {});
+                    });
             }
-        } catch (error) {
-            logger.error(
-                `Error adding new servers: ${(error as Error).message}`
-            );
-            res.status(500).json({
-                error: "Failed to add new servers " + error,
-            });
+        } else {
+            for (let serverData of serversDataNormalized) {
+                try {
+                    if (
+                        serverData.services.includes(
+                            MongoDbTypes.ServiceType.LiteNode
+                        )
+                    ) {
+                        await Mongodb.getLiteNodeCollection()
+                            .insertOne({
+                                server: serverData.server,
+                                operator: operator as string,
+                                isPrivate: false,
+                            })
+                            .catch((_) => {});
+                    }
+
+                    if (
+                        serverData.services.includes(
+                            MongoDbTypes.ServiceType.BobNode
+                        )
+                    ) {
+                        await Mongodb.getBobNodeCollection()
+                            .insertOne({
+                                server: serverData.server,
+                                operator: operator as string,
+                                isPrivate: false,
+                            })
+                            .catch((_) => {});
+                    }
+                    await NodeService.pullServerLists();
+                } catch (error) {}
+            }
+        }
+    } catch (error) {
+        logger.error(`Error adding new servers: ${(error as Error).message}`);
+        res.status(500).json({
+            error: "Failed to add new servers " + error,
+        });
+        return;
+    }
+
+    res.json({ message: "Servers added successfully" });
+});
+
+router.get("/my-servers", authenticateToken, async (req, res) => {
+    try {
+        let operator = req.user?.username;
+        if (!operator) {
+            res.status(400).json({ error: "No operator found" });
             return;
         }
 
-        res.json({ message: "Servers added successfully" });
+        let servers = await Mongodb.getServersCollection()
+            .find({ operator: mongodbOperatorSelection(operator) })
+            .project({
+                _id: 0,
+                password: 0,
+                setupLogs: 0,
+                deployLogs: 0,
+            })
+            .toArray();
+        res.json({ servers });
+    } catch (error) {
+        logger.error(`Error fetching my servers: ${(error as Error).message}`);
+        res.status(500).json({
+            error: "Failed to fetch servers " + error,
+        });
     }
-);
+});
 
-router.get(
-    "/my-servers",
-    authenticateToken,
-    async (req, res) => {
-        try {
-            let operator = req.user?.username;
-            if (!operator) {
-                res.status(400).json({ error: "No operator found" });
-                return;
-            }
+router.post("/delete-server", authenticateToken, async (req, res) => {
+    try {
+        let operator = req.user?.username;
+        let servers = req.body.servers as string[];
+        if (!operator) {
+            res.status(400).json({ error: "No operator found" });
+            return;
+        }
+        if (!servers) {
+            res.status(400).json({ error: "No server specified" });
+            return;
+        }
 
-            let servers = await Mongodb.getServersCollection()
-                .find({ operator: mongodbOperatorSelection(operator) })
-                .project({
-                    _id: 0,
-                    password: 0,
-                    setupLogs: 0,
-                    deployLogs: 0,
-                })
-                .toArray();
-            res.json({ servers });
-        } catch (error) {
-            logger.error(
-                `Error fetching my servers: ${(error as Error).message}`
-            );
-            res.status(500).json({
-                error: "Failed to fetch servers " + error,
+        for (let server of servers) {
+            await Mongodb.getServersCollection().deleteOne({
+                server: server,
+            });
+
+            // Remove all lite/bob nodes associated with it
+            await Mongodb.getLiteNodeCollection().deleteOne({
+                server: server,
+            });
+            await Mongodb.getBobNodeCollection().deleteOne({
+                server: server,
             });
         }
+        await NodeService.pullServerLists();
+        res.json({ message: "Server deleted successfully" });
+    } catch (error) {
+        logger.error(`Error deleting server: ${(error as Error).message}`);
+        res.status(500).json({
+            error: "Failed to delete server " + error,
+        });
     }
-);
+});
 
 router.post(
-    "/delete-server",
+    "/transfer-server-ownership",
     authenticateToken,
     async (req, res) => {
         try {
             let operator = req.user?.username;
-            let servers = req.body.servers as string[];
+            let { server, newOwner } = req.body;
             if (!operator) {
                 res.status(400).json({ error: "No operator found" });
                 return;
             }
-            if (!servers) {
-                res.status(400).json({ error: "No server specified" });
+            if (!server || !newOwner) {
+                res.status(400).json({ error: "Missing parameters" });
                 return;
             }
 
-            for (let server of servers) {
-                await Mongodb.getServersCollection().deleteOne({
-                    server: server,
-                });
-
-                // Remove all lite/bob nodes associated with it
-                await Mongodb.getLiteNodeCollection().deleteOne({
-                    server: server,
-                });
-                await Mongodb.getBobNodeCollection().deleteOne({
-                    server: server,
-                });
+            // check if newOwner exists
+            let newOwnerDoc = await Mongodb.getUsersCollection().findOne({
+                username: mongodbOperatorSelection(newOwner),
+            });
+            if (!newOwnerDoc) {
+                res.status(404).json({ error: "New owner not found" });
+                return;
             }
+
+            // check if server exists and belongs to operator
+            let serverDoc = await Mongodb.getServersCollection().findOne({
+                server: server,
+                operator: mongodbOperatorSelection(operator),
+            });
+            if (!serverDoc) {
+                res.status(404).json({ error: "Server not found" });
+                return;
+            }
+
+            await Mongodb.getServersCollection().updateOne(
+                { server: server },
+                { $set: { operator: newOwner } }
+            );
+
+            // Also transfer lite/bob nodes associated with it
+            await Mongodb.getLiteNodeCollection().updateMany(
+                { server: server },
+                { $set: { operator: newOwner } }
+            );
+            await Mongodb.getBobNodeCollection().updateMany(
+                { server: server },
+                { $set: { operator: newOwner } }
+            );
+
             await NodeService.pullServerLists();
-            res.json({ message: "Server deleted successfully" });
+
+            res.json({ message: "Server ownership transferred successfully" });
         } catch (error) {
             logger.error(
-                `Error deleting server: ${(error as Error).message}`
+                `Error transferring server ownership: ${
+                    (error as Error).message
+                }`
             );
             res.status(500).json({
-                error: "Failed to delete server " + error,
+                error: "Failed to transfer server ownership " + error,
             });
         }
     }

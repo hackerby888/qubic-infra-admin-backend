@@ -351,6 +351,7 @@ router.post("/delete-server", authenticateToken, async (req, res) => {
             await Mongodb.getBobNodeCollection().deleteOne({
                 server: server,
             });
+            SSHService._clearSSHPortCache(server);
         }
         await NodeService.pullServerLists();
         res.json({ message: "Server deleted successfully" });

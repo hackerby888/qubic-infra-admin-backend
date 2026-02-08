@@ -358,6 +358,10 @@ export namespace SSHService {
         return port;
     }
 
+    export function _clearSSHPortCache(host: string) {
+        delete sshPortCache[host];
+    }
+
     export async function _accquireExecutionLock(host: string) {
         while (
             _isExecutingCommandsMap[host] ||

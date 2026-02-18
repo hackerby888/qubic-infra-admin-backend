@@ -235,14 +235,14 @@ export namespace SSHService {
                 `echo "${targetGbForKeyDb}" > /etc/keydb_ram.txt`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
                 // Copy original config file and append custom keydb and kvrocks config
-                `cp /etc/keydb.conf /etc/keydb-runtime.conf && printf '\n\n' >> /etc/keydb-runtime.conf`,
-                `cp /etc/kvrocks.conf /etc/kvrocks-runtime.conf && printf '\n\n' >> /etc/kvrocks-runtime.conf`,
-                `echo '${(keydbConfig || []).join(
+                `cp /etc/keydb.conf /etc/keydb-runtime.conf && echo -e "\n\n" >> /etc/keydb-runtime.conf`,
+                `cp /etc/kvrocks.conf /etc/kvrocks-runtime.conf && echo -e "\n\n" >> /etc/kvrocks-runtime.conf`,
+                `echo "${(keydbConfig || []).join(
                     "\n"
-                )}' >> /etc/keydb-runtime.conf`,
-                `echo '${(kvrocksConfig || []).join(
+                )}" >> /etc/keydb-runtime.conf`,
+                `echo "${(kvrocksConfig || []).join(
                     "\n"
-                )}' >> /etc/kvrocks-runtime.conf`,
+                )}" >> /etc/kvrocks-runtime.conf`,
                 `screen -dmS keydb bash -lc "keydb-server /etc/keydb-runtime.conf || exec bash"`,
                 `screen -dmS kvrocks bash -lc "kvrocks -c /etc/kvrocks-runtime.conf || exec bash"`,
                 `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,

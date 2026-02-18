@@ -330,18 +330,16 @@ router.post("/execute-command", authenticateToken, async (req, res) => {
             },
             "restartkeydb:bob": () => {
                 return [
-                    `pkill -9 keydb-server || true`,
+                    `while pgrep -x keydb-server >/dev/null; do { echo "Waiting for keydb to be shutdown..."; sleep 1; pkill -2 keydb-server || true; }; done`,
                     `for s in $(screen -ls | awk '/keydb/ {print $1}'); do screen -S "$s" -X quit || true; done`,
-                    `while pgrep -x keydb-server >/dev/null; do { echo "Waiting for keydb to be shutdown..."; sleep 1; }; done`,
                     `screen -dmS keydb bash -lc "keydb-server /etc/keydb-runtime.conf || exec bash"`,
                     `until [[ "$(keydb-cli ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for keydb..."; sleep 1; }; done`,
                 ];
             },
             "restartkvrocks:bob": () => {
                 return [
-                    `pkill -9 kvrocks || true`,
+                    `while pgrep -x kvrocks >/dev/null; do { echo "Waiting for kvrocks to be shutdown..."; sleep 1; pkill -2 kvrocks || true; }; done`,
                     `for s in $(screen -ls | awk '/kvrocks/ {print $1}'); do screen -S "$s" -X quit || true; done`,
-                    `while pgrep -x kvrocks >/dev/null; do { echo "Waiting for kvrocks to be shutdown..."; sleep 1; }; done`,
                     `screen -dmS kvrocks bash -lc "kvrocks -c /etc/kvrocks-runtime.conf || exec bash"`,
                     `until [[ "$(keydb-cli -h 127.0.0.1 -p 6666 ping 2>/dev/null)" == "PONG" ]]; do { echo "Waiting for kvrocks..."; sleep 1; }; done`,
                 ];

@@ -263,16 +263,14 @@ export namespace SSHService {
                 ];
             } else if (type === MongoDbTypes.ServiceType.BobNode) {
                 let killDbCommands = [
-                    `pkill -9 keydb-server || true; sleep 1; pkill -9 keydb-server || true`,
-                    `pkill -9 kvrocks || true ; sleep 1; pkill -9 kvrocks || true`,
+                    `while pgrep -x keydb-server >/dev/null; do { echo "Waiting for keydb to be shutdown..."; sleep 1; pkill -2 keydb-server || true; }; done`,
+                    `while pgrep -x kvrocks >/dev/null; do { echo "Waiting for kvrocks to be shutdown..."; sleep 1; pkill -2 kvrocks || true; }; done`,
                     `for s in $(screen -ls | awk '/keydb/ {print $1}'); do screen -S "$s" -X quit || true; done`,
                     `for s in $(screen -ls | awk '/kvrocks/ {print $1}'); do screen -S "$s" -X quit || true; done`,
-                    `while pgrep -x keydb-server >/dev/null; do { echo "Waiting for keydb to be shutdown..."; sleep 1; }; done`,
-                    `while pgrep -x kvrocks >/dev/null; do { echo "Waiting for kvrocks to be shutdown..."; sleep 1; }; done`,
                 ];
                 return [
+                    `[ -d ~/qbob ] && [ -f ~/qbob/binary_name.txt ] && cd ~ && cd qbob && BOB_BINARY_NAME=$(cat binary_name.txt) && while pgrep -x $BOB_BINARY_NAME >/dev/null; do { echo "Waiting for bobnode to be shutdown..."; sleep 1; pkill -2 $BOB_BINARY_NAME || true; }; done`,
                     `for s in $(screen -ls | awk '/${BOB_SCREEN_NAME}/ {print $1}'); do screen -S "$s" -X quit || true; done`,
-                    `[ -d ~/qbob ] && [ -f ~/qbob/binary_name.txt ] && cd ~ && cd qbob && BOB_BINARY_NAME=$(cat binary_name.txt) && while pgrep -x $BOB_BINARY_NAME >/dev/null; do { echo "Waiting for bobnode to be shutdown..."; sleep 1; }; done`,
                     ...(killDb ? killDbCommands : []),
                     `echo "Debug: BOB_BINARY_NAME=$BOB_BINARY_NAME"`,
                 ];

@@ -429,4 +429,30 @@ router.post(
     }
 );
 
+router.post("/update-server-note", authenticateToken, async (req, res) => {
+    try {
+        let operator = req.user?.username;
+        let { server, note } = req.body;
+        if (!operator) {
+            res.status(400).json({ error: "No operator found" });
+            return;
+        }
+        if (!server) {
+            res.status(400).json({ error: "No server specified" });
+            return;
+        }
+
+        await Mongodb.getServersCollection().updateOne(
+            { server: server, operator: mongodbOperatorSelection(operator) },
+            { $set: { note: note } }
+        );
+        res.json({ message: "Server note updated successfully" });
+    } catch (error) {
+        logger.error(`Error updating server note: ${(error as Error).message}`);
+        res.status(500).json({
+            error: "Failed to update server note " + error,
+        });
+    }
+});
+
 export default router;

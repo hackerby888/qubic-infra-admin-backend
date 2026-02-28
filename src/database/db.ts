@@ -131,6 +131,13 @@ export namespace MongoDbTypes {
         currentsshPrivateKey?: string;
         insertedAt: number;
     }
+
+    export interface CrashReport {
+        ip: string;
+        type: string;
+        logs: string;
+        timestamp: number;
+    }
 }
 
 export namespace Mongodb {
@@ -179,6 +186,10 @@ export namespace Mongodb {
             throw new Error("Database not connected. Call connectDB first.");
         }
         return db;
+    }
+
+    export function getCrashReportsCollection() {
+        return getDB().collection<MongoDbTypes.CrashReport>("crash_reports");
     }
 
     export function getCheckinsCollection() {

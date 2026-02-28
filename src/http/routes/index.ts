@@ -10,6 +10,7 @@ import nodesRoutes from "./nodes.routes.js";
 import monitoringRoutes from "./monitoring.routes.js";
 import automationRoutes from "./automation.routes.js";
 import mapRoutes from "./map.routes.js";
+import crashReportRoutes from "./crashreport.routes.js";
 
 export function setupRoutes(app: express.Application) {
     // Health check
@@ -44,4 +45,7 @@ export function setupRoutes(app: express.Application) {
 
     // Map
     app.use("/", mapRoutes);
+
+    // Crash reports (uncomment if you want to enable crash report handling)
+    app.use("/", crashReportRoutes);
 }

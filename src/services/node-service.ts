@@ -139,6 +139,10 @@ namespace NodeService {
         }
     }
 
+    export function getLiteNodeInfo(server: string) {
+        return _status.liteServers[server];
+    }
+
     export function getStatus() {
         // Convert to array of server statuses
         let liteNodesStatus = Object.entries(_status.liteServers).map(

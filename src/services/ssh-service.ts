@@ -10,6 +10,7 @@ import {
     getUnzipCommandFromUrl,
     inlineBashCommands,
 } from "../utils/common.js";
+import { NodeService } from "./node-service.js";
 
 namespace Utils {
     export function getBobConfigOverrideObject(peers: string[]) {
@@ -725,6 +726,17 @@ export namespace SSHService {
                 (error as Error).message
             }`;
             return { stdouts, stderrs, isSuccess, duration: 0 };
+        }
+
+        let liteNodeInfo = NodeService.getLiteNodeInfo(host);
+        if (liteNodeInfo) {
+            while (
+                liteNodeInfo?.isSavingSnapshot &&
+                Date.now() - liteNodeInfo.lastUpdated < 10 * 1000
+            ) {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                liteNodeInfo = NodeService.getLiteNodeInfo(host);
+            }
         }
 
         await _accquireExecutionLock(host);

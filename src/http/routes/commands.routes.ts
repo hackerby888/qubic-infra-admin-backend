@@ -317,6 +317,11 @@ router.post("/execute-command", authenticateToken, async (req, res) => {
                     `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[21~'`,
                 ];
             },
+            "f11/staticmode:lite": () => {
+                return [
+                    `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[23~'`,
+                ];
+            },
             "placebinary:bob": (url: string) => {
                 if (!url || !url.startsWith("http")) {
                     throw new Error("Invalid URL for binary");

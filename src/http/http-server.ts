@@ -10,14 +10,14 @@ namespace HttpServer {
         const app = express();
         app.use(express.json());
         app.use(cors());
-        const port = process.env.PORT || 3000;
+        const port = parseInt(process.env.PORT || "3000");
 
         // Setup all routes
         setupRoutes(app);
 
         let server: any;
-        if (process.env.ENV === "production") {
-            logger.info("Starting HTTPS server in production mode");
+        if (port == 443) {
+            logger.info("Starting HTTPS server in production mode (SSL)");
             const httpsOptions = {
                 key: fs.readFileSync(
                     process.env.HTTPS_KEY_PATH || "./certs/key.pem"

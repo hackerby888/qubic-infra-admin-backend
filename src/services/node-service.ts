@@ -1,4 +1,4 @@
-import { Mongodb, type MongoDbTypes } from "../database/db.js";
+import { Mongodb, MongoDbTypes } from "../database/db.js";
 import { isNodeActive } from "../utils/common.js";
 import type { IpInfo } from "../utils/ip.js";
 import { logger } from "../utils/logger.js";
@@ -398,6 +398,9 @@ namespace NodeService {
         try {
             let liteServers = await Mongodb.getLiteNodes();
             let bobServers = await Mongodb.getBobNodes();
+            let allServers = (await Mongodb.getServersCollection()
+                .find({})
+                .toArray()) as MongoDbTypes.Server[];
 
             for (let node of [...liteServers, ...bobServers]) {
                 if (!_ipInfoCache[node.server]) {
@@ -419,8 +422,57 @@ namespace NodeService {
                 }
             }
 
-            _currentLiteNodes = liteServers.map((node) => ({ ...node }));
-            _currentBobNodes = bobServers.map((node) => ({ ...node }));
+            _currentLiteNodes = liteServers
+                .map((node) => ({ ...node }))
+                .filter((node) => {
+                    let serverDoc = allServers.find(
+                        (s) => s.server === node.server
+                    );
+                    let services = serverDoc?.services || [];
+                    let isLiteNode = services.includes(
+                        MongoDbTypes.ServiceType.LiteNode
+                    );
+
+                    if (!isLiteNode) {
+                        // remove from database if it's not a lite node
+                        Mongodb.getLiteNodeCollection()
+                            .deleteOne({ server: node.server })
+                            .then(() => {
+                                logger.info(
+                                    `Removed ${node.server} from Lite Nodes collection as it's no longer a Lite Node`
+                                );
+                            })
+                            .catch(() => {});
+                    }
+
+                    return isLiteNode;
+                });
+            _currentBobNodes = bobServers
+                .map((node) => ({ ...node }))
+                .filter((node) => {
+                    let serverDoc = allServers.find(
+                        (s) => s.server === node.server
+                    );
+                    let services = serverDoc?.services || [];
+                    let isBobNode = services.includes(
+                        MongoDbTypes.ServiceType.BobNode
+                    );
+
+                    if (!isBobNode) {
+                        // remove from database if it's not a bob node
+                        Mongodb.getBobNodeCollection()
+                            .deleteOne({ server: node.server })
+                            .then(() => {
+                                logger.info(
+                                    `Removed ${node.server} from Bob Nodes collection as it's no longer a Bob Node`
+                                );
+                            })
+                            .catch(() => {});
+                    }
+
+                    return isBobNode;
+                });
+
             logger.info(
                 `Pulled ${liteServers.length} Lite Nodes and ${bobServers.length} Bob Nodes from database`
             );

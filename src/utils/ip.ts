@@ -1,3 +1,6 @@
+import { isIPv4 } from "net";
+import { logger } from "./logger.js";
+
 export interface IpInfo {
     country: string;
     region: string;
@@ -8,6 +11,17 @@ export interface IpInfo {
 }
 
 export async function lookupIp(ip: string): Promise<IpInfo> {
+    if (!isIPv4(ip)) {
+        logger.warn(`Invalid IP address: ${ip}`);
+        return {
+            country: "Unknown",
+            region: "Unknown",
+            city: "Unknown",
+            isp: "Unknown",
+            lat: 0,
+            lon: 0,
+        };
+    }
     let url = `http://ip-api.com/json/${ip}`;
     let retries = 3;
     while (retries > 0) {
@@ -31,7 +45,7 @@ export async function lookupIp(ip: string): Promise<IpInfo> {
                 lon: data.lon,
             };
         } catch (error) {
-            console.error(
+            logger.error(
                 `Error fetching IP info: ${error}. Retries left: ${retries - 1}`
             );
             retries--;

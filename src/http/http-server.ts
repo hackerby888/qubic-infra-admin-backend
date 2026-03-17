@@ -33,7 +33,7 @@ namespace HttpServer {
             });
         } else {
             logger.info("Starting HTTP server in development mode");
-            server = app.listen(port, () => {
+            server = app.listen(port, "0.0.0.0", () => {
                 logger.info(
                     `HTTP Server is running at http://localhost:${port}`
                 );

@@ -1,10 +1,12 @@
 import { Mongodb, MongoDbTypes } from "../database/db.js";
+import type { QueryPeersMode } from "../types/type.js";
 import { isNodeActive } from "../utils/common.js";
 import type { IpInfo } from "../utils/ip.js";
 import { logger } from "../utils/logger.js";
 import { calcGroupIdFromIds } from "../utils/node.js";
 import { sleep } from "../utils/time.js";
 import { SSHService } from "./ssh-service.js";
+import * as geolib from "geolib";
 
 namespace NodeService {
     const IDLE_TIME = 1000; // 1 second
@@ -481,7 +483,15 @@ namespace NodeService {
 
     export function getRandomLiteNode(
         n: number,
-        isNeedLoggingPasscode = false
+        {
+            isNeedLoggingPasscode = false,
+            mode = "random",
+            clientIpInfo,
+        }: {
+            isNeedLoggingPasscode?: boolean;
+            mode?: QueryPeersMode;
+            clientIpInfo?: IpInfo | null;
+        } = {}
     ) {
         let servers: MongoDbTypes.LiteNode[] = [..._currentLiteNodes];
         if (n >= servers.length) {
@@ -506,29 +516,69 @@ namespace NodeService {
             }
         };
 
-        let numberOfActiveNodes = servers.filter((server) =>
+        let candidateServers = servers.filter((server) =>
             checkIsCandidateNode(server)
-        ).length;
+        );
+        let numberOfActiveNodes = candidateServers.length;
 
         if (numberOfActiveNodes < n) {
             n = numberOfActiveNodes;
         }
 
+        let distanceMap: { server: string; distance: number }[] = [];
+        if (mode === "closest" && clientIpInfo) {
+            candidateServers.forEach((server) => {
+                let serverIpInfo = _ipInfoCache[server.server];
+                if (serverIpInfo) {
+                    let distance = geolib.getDistance(
+                        {
+                            latitude: clientIpInfo.lat,
+                            longitude: clientIpInfo.lon,
+                        },
+                        {
+                            latitude: serverIpInfo.lat,
+                            longitude: serverIpInfo.lon,
+                        }
+                    );
+                    distanceMap.push({ server: server.server, distance });
+                }
+            });
+
+            // sort by distance
+            distanceMap.sort((a, b) => a.distance - b.distance);
+
+            // return top n closest nodes that are active
+            selectedServers = distanceMap.slice(0, n).map((item) => {
+                return candidateServers.find((s) => s.server === item.server)!;
+            });
+
+            return selectedServers;
+        }
+
+        // random mode, select random nodes from candidate servers
         while (selectedServers.length < n) {
-            let randomIndex = Math.floor(Math.random() * servers.length);
-            if (
-                !usedIndices.has(randomIndex) &&
-                checkIsCandidateNode(servers[randomIndex]!)
-            ) {
+            let randomIndex = Math.floor(
+                Math.random() * candidateServers.length
+            );
+            if (!usedIndices.has(randomIndex)) {
                 usedIndices.add(randomIndex);
-                selectedServers.push(servers[randomIndex]!);
+                selectedServers.push(candidateServers[randomIndex]!);
             }
         }
 
         return selectedServers;
     }
 
-    export function getRandomBobNode(n: number) {
+    export function getRandomBobNode(
+        n: number,
+        {
+            mode = "random",
+            clientIpInfo,
+        }: {
+            mode?: QueryPeersMode;
+            clientIpInfo?: IpInfo | null;
+        } = {}
+    ) {
         let servers: MongoDbTypes.BobNode[] = [..._currentBobNodes];
         if (n >= servers.length) {
             return servers;
@@ -543,22 +593,52 @@ namespace NodeService {
             );
         };
 
-        let numberOfActiveNodes = servers.filter((server) =>
+        let candidateServers = servers.filter((server) =>
             checkIsCandidateNode(server)
-        ).length;
+        );
+        let numberOfActiveNodes = candidateServers.length;
 
         if (numberOfActiveNodes < n) {
             n = numberOfActiveNodes;
         }
 
+        let distanceMap: { server: string; distance: number }[] = [];
+        if (mode === "closest" && clientIpInfo) {
+            candidateServers.forEach((server) => {
+                let serverIpInfo = _ipInfoCache[server.server];
+                if (serverIpInfo) {
+                    let distance = geolib.getDistance(
+                        {
+                            latitude: clientIpInfo.lat,
+                            longitude: clientIpInfo.lon,
+                        },
+                        {
+                            latitude: serverIpInfo.lat,
+                            longitude: serverIpInfo.lon,
+                        }
+                    );
+                    distanceMap.push({ server: server.server, distance });
+                }
+            });
+
+            // sort by distance
+            distanceMap.sort((a, b) => a.distance - b.distance);
+
+            // return top n closest nodes that are active
+            selectedServers = distanceMap.slice(0, n).map((item) => {
+                return candidateServers.find((s) => s.server === item.server)!;
+            });
+
+            return selectedServers;
+        }
+
         while (selectedServers.length < n) {
-            let randomIndex = Math.floor(Math.random() * servers.length);
-            if (
-                !usedIndices.has(randomIndex) &&
-                checkIsCandidateNode(servers[randomIndex]!)
-            ) {
+            let randomIndex = Math.floor(
+                Math.random() * candidateServers.length
+            );
+            if (!usedIndices.has(randomIndex)) {
                 usedIndices.add(randomIndex);
-                selectedServers.push(servers[randomIndex]!);
+                selectedServers.push(candidateServers[randomIndex]!);
             }
         }
 

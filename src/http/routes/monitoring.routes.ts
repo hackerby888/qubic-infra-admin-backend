@@ -2,32 +2,51 @@ import express from "express";
 import { NodeService } from "../../services/node-service.js";
 import { Mongodb, MongoDbTypes } from "../../database/db.js";
 import { logger } from "../../utils/logger.js";
-import { checkLink, lastCheckinMap } from "../../utils/common.js";
-import { getLastWednesdayTimestamp } from "../../utils/time.js";
+import { lastCheckinMap } from "../../utils/common.js";
 import { MapService } from "../../services/map-service.js";
 import { Checkin } from "../../services/logic/checkin.js";
+import type { QueryPeersMode } from "../../types/type.js";
+import type { IpInfo } from "../../utils/ip.js";
+import { isIPv4 } from "net";
 
 const router = express.Router();
 
-router.get("/random-peers", (req, res) => {
+router.get("/random-peers", async (req, res) => {
     try {
-        let expectedLitePeersLength =
-            parseInt(req.query.litePeers as string) || 2;
-        let expectedBobPeersLength =
-            parseInt(req.query.bobPeers as string) || 2;
+        let clientIpV4 = req.ip;
+        let clientIpInfo: IpInfo | null = null;
+        if (clientIpV4 && isIPv4(clientIpV4) && clientIpV4 != "127.0.0.1") {
+            clientIpInfo = await MapService.getIpInfoForServer(clientIpV4, {
+                enqueueIfNotFound: true,
+                waitForLookup: true,
+            });
+        }
+        let expectedLitePeersLength = parseInt(req.query.litePeers as string);
+        let expectedBobPeersLength = parseInt(req.query.bobPeers as string);
+        const mode: QueryPeersMode =
+            (req.query.mode as QueryPeersMode) || "random";
         let service = req.query.service as MongoDbTypes.ServiceType;
         if (service == MongoDbTypes.ServiceType.LiteNode) {
-            let peers = NodeService.getRandomLiteNode(
-                expectedLitePeersLength
-            ).map((peer) => peer.server);
+            let peers = NodeService.getRandomLiteNode(expectedLitePeersLength, {
+                mode,
+                clientIpInfo: clientIpInfo,
+            }).map((peer) => peer.server);
             res.json({ peers: peers });
         } else if (service == MongoDbTypes.ServiceType.BobNode) {
             let litePeers = NodeService.getRandomLiteNode(
                 expectedLitePeersLength,
-                true
+                {
+                    isNeedLoggingPasscode: true,
+                    clientIpInfo: clientIpInfo,
+                    mode,
+                }
             ).map((peer) => peer.server);
             let bobPeers = NodeService.getRandomBobNode(
-                expectedBobPeersLength
+                expectedBobPeersLength,
+                {
+                    clientIpInfo: clientIpInfo,
+                    mode,
+                }
             ).map((peer) => peer.server);
             res.json({
                 litePeers: litePeers,

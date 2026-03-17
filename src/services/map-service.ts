@@ -1,3 +1,4 @@
+import { isIPv4 } from "net";
 import { Mongodb } from "../database/db.js";
 import { lookupIp, type IpInfo } from "../utils/ip.js";
 import { logger } from "../utils/logger.js";
@@ -16,9 +17,15 @@ namespace MapService {
 
     export async function getIpInfoForServer(
         server: string,
-        enqueueIfNotFound: boolean = true
+        settings: {
+            enqueueIfNotFound?: boolean;
+            waitForLookup?: boolean;
+        } = {}
     ): Promise<IpInfo | null> {
         try {
+            if (!isIPv4(server)) {
+                return null;
+            }
             if (ipcache[server]) {
                 return ipcache[server];
             }
@@ -32,8 +39,14 @@ namespace MapService {
                 return ipInfoDoc.ipInfo;
             }
 
-            if (enqueueIfNotFound) {
+            if (settings.enqueueIfNotFound) {
                 enqueueServerForIpLookup(server);
+                if (settings.waitForLookup) {
+                    while (!ipcache[server]) {
+                        await sleep(100);
+                    }
+                    return ipcache[server];
+                }
             }
 
             return null;
@@ -66,14 +79,13 @@ namespace MapService {
                     { upsert: true }
                 );
             } catch (error) {
-                console.error(
-                    `Failed to update IP info for server ${server}:`,
-                    error
+                logger.error(
+                    `MapService: Failed to update IP info for server ${server}: ${error}`
                 );
                 // Re-enqueue the server for retry
                 queue.push(server);
             }
-        }, 1000); // Process one server every 1 second
+        }, 10);
     }
 
     export async function watchAndUpdateBMNodes() {
@@ -90,7 +102,9 @@ namespace MapService {
                 let newBmNodes: Set<string> = new Set();
                 data.forEach((node) => {
                     newBmNodes.add(node.ipAddress);
-                    getIpInfoForServer(node.ipAddress, true);
+                    getIpInfoForServer(node.ipAddress, {
+                        enqueueIfNotFound: true,
+                    });
                 });
                 bmNodes = newBmNodes;
                 logger.info(

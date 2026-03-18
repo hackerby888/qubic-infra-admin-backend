@@ -487,10 +487,12 @@ namespace NodeService {
             isNeedLoggingPasscode = false,
             mode = "random",
             clientIpInfo,
+            filterOut = [],
         }: {
             isNeedLoggingPasscode?: boolean;
             mode?: QueryPeersMode;
             clientIpInfo?: IpInfo | null;
+            filterOut?: string[];
         } = {}
     ) {
         let servers: MongoDbTypes.LiteNode[] = [..._currentLiteNodes];
@@ -574,12 +576,19 @@ namespace NodeService {
         {
             mode = "random",
             clientIpInfo,
+            filterOut = [],
         }: {
             mode?: QueryPeersMode;
             clientIpInfo?: IpInfo | null;
+            filterOut?: string[];
         } = {}
     ) {
         let servers: MongoDbTypes.BobNode[] = [..._currentBobNodes];
+
+        servers = servers.filter(
+            (server) => !filterOut.includes(server.server)
+        );
+
         if (n >= servers.length) {
             return servers;
         }

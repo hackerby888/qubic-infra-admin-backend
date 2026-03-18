@@ -46,6 +46,7 @@ router.get("/random-peers", async (req, res) => {
                 {
                     clientIpInfo: clientIpInfo,
                     mode,
+                    filterOut: litePeers,
                 }
             ).map((peer) => peer.server);
             res.json({

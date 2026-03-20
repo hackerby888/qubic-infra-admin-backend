@@ -9,10 +9,14 @@ namespace MapService {
     let ipcache: { [server: string]: IpInfo } = {};
     let bmNodes: Set<string> = new Set();
 
-    export function enqueueServerForIpLookup(server: string) {
+    export function enqueueServerForIpLookup(server: string): boolean {
+        if (!isIPv4(server)) {
+            return false;
+        }
         if (!ipcache[server] && !queue.includes(server)) {
             queue.push(server);
         }
+        return true;
     }
 
     export async function getIpInfoForServer(
@@ -40,7 +44,10 @@ namespace MapService {
             }
 
             if (settings.enqueueIfNotFound) {
-                enqueueServerForIpLookup(server);
+                let isOk = enqueueServerForIpLookup(server);
+                if (!isOk) {
+                    return null;
+                }
                 if (settings.waitForLookup) {
                     while (!ipcache[server]) {
                         await sleep(100);

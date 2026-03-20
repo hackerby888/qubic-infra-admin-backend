@@ -372,7 +372,10 @@ namespace NodeService {
                 });
                 // filter out nodes that are already in system nodes to avoid duplication
                 liteNodesFromCheckins = liteNodesFromCheckins.filter(
-                    (c) => !_status.liteServers[c.ip]
+                    (c) =>
+                        _currentLiteNodes.findIndex(
+                            (s) => s.server === c.ip
+                        ) === -1
                 );
                 let startTime = Date.now();
                 await handleFetchAndUpdate(
@@ -471,7 +474,9 @@ namespace NodeService {
                 });
                 // filter out nodes that are already in system nodes to avoid duplication
                 bobNodesFromCheckins = bobNodesFromCheckins.filter(
-                    (c) => !_status.bobServers[c.ip]
+                    (c) =>
+                        _currentBobNodes.findIndex((s) => s.server === c.ip) ===
+                        -1
                 );
                 let startTime = Date.now();
                 await handleFetchAndUpdate(

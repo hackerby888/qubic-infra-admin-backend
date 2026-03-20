@@ -150,6 +150,7 @@ router.get("/checkins", async (req, res) => {
                 normalized,
                 epoch,
                 excludeDefaultOp,
+                useCache: false, // for monitoring page, we want to get the latest data, so disable cache
             });
         } catch (error) {
             res.status(400).json({

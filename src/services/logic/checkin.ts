@@ -12,6 +12,7 @@ namespace Checkin {
         normalized,
         epoch,
         excludeDefaultOp,
+        useCache = true,
     }: {
         type?: string | undefined;
         operator?: string | undefined;
@@ -19,20 +20,23 @@ namespace Checkin {
         normalized?: boolean | undefined;
         epoch: number;
         excludeDefaultOp?: boolean | undefined;
+        useCache?: boolean;
     }): Promise<MongoDbTypes.Checkin[]> {
-        // check cache first
-        let cacheKeyObject = {
-            type,
-            operator,
-            ipv4,
-            normalized,
-            epoch,
-            excludeDefaultOp,
-        };
-        let cacheKey = JSON.stringify(cacheKeyObject);
-        let cached = cache.get<any[]>(cacheKey);
-        if (cached) {
-            return cached;
+        if (useCache) {
+            // check cache first
+            let cacheKeyObject = {
+                type,
+                operator,
+                ipv4,
+                normalized,
+                epoch,
+                excludeDefaultOp,
+            };
+            let cacheKey = JSON.stringify(cacheKeyObject);
+            let cached = cache.get<any[]>(cacheKey);
+            if (cached) {
+                return cached;
+            }
         }
 
         // no cache, fetch from db

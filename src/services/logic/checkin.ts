@@ -19,7 +19,7 @@ namespace Checkin {
         normalized?: boolean | undefined;
         epoch: number;
         excludeDefaultOp?: boolean | undefined;
-    }): Promise<any[]> {
+    }): Promise<MongoDbTypes.Checkin[]> {
         // check cache first
         let cacheKeyObject = {
             type,

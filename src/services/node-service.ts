@@ -5,6 +5,7 @@ import type { IpInfo } from "../utils/ip.js";
 import { logger } from "../utils/logger.js";
 import { calcGroupIdFromIds } from "../utils/node.js";
 import { sleep } from "../utils/time.js";
+import { Checkin } from "./logic/checkin.js";
 import { SSHService } from "./ssh-service.js";
 import * as geolib from "geolib";
 
@@ -55,8 +56,20 @@ namespace NodeService {
     let _ipInfoCache: { [ip: string]: IpInfo } = {};
     let _currentLiteNodes: LiteNodeExtended[] = [];
     let _currentBobNodes: BobNodeExtended[] = [];
+    let _serverToOperatorMap: { [server: string]: string } = {};
 
     let _status: {
+        liteServers: {
+            [server: string]: LiteNodeTickInfo;
+        };
+        bobServers: {
+            [server: string]: BobNodeTickInfo;
+        };
+    } = {
+        liteServers: {},
+        bobServers: {},
+    };
+    let _statusCheckin: {
         liteServers: {
             [server: string]: LiteNodeTickInfo;
         };
@@ -145,7 +158,7 @@ namespace NodeService {
         return _status.liteServers[server];
     }
 
-    export function getStatus() {
+    export function getSystemNodesStatus() {
         // Convert to array of server statuses
         let liteNodesStatus = Object.entries(_status.liteServers).map(
             ([server, info]) => ({
@@ -171,8 +184,34 @@ namespace NodeService {
         return statuses;
     }
 
+    export function getCheckinNodesStatus() {
+        // Convert to array of server statuses
+        let liteNodesStatus = Object.entries(_statusCheckin.liteServers).map(
+            ([server, info]) => ({
+                server,
+                region: "",
+                ...info,
+            })
+        );
+
+        let bobNodesStatus = Object.entries(_statusCheckin.bobServers).map(
+            ([server, info]) => ({
+                server,
+                region: "",
+                ...info,
+            })
+        );
+
+        let statuses = {
+            liteNodes: liteNodesStatus,
+            bobNodes: bobNodesStatus,
+        };
+
+        return statuses;
+    }
+
     export function getNetworkStatus() {
-        let statuses = NodeService.getStatus();
+        let statuses = NodeService.getSystemNodesStatus();
         let currentTick = 0;
         let epoch = 0;
         for (let node of statuses.liteNodes) {
@@ -216,33 +255,28 @@ namespace NodeService {
 
     async function watchLiteNodes() {
         const isGotRunningIds: { [server: string]: boolean } = {};
-        while (true) {
-            let servers: MongoDbTypes.LiteNode[] = [..._currentLiteNodes];
-            // Check removed node and delete them from status object
-            if (
-                _status.liteServers &&
-                Object.keys(_status.liteServers).length > 0
-            ) {
-                Object.keys(_status.liteServers).forEach((server) => {
-                    if (!servers.some((s) => s.server === server)) {
-                        delete _status.liteServers[server];
-                    }
-                });
-            }
 
+        const handleFetchAndUpdate = async (
+            statusObject: {
+                [server: string]: LiteNodeTickInfo;
+            },
+            servers: string[],
+            serversLiteNodeDb?: MongoDbTypes.LiteNode[]
+        ) => {
             let allPromises = servers.map((server) =>
-                getLiteNodeTickInfo(server.server)
+                getLiteNodeTickInfo(server)
             );
             let results = await Promise.all(allPromises);
 
             results.forEach((tickInfo, index) => {
-                let serverObject =
-                    _status.liteServers[servers[index]!.server as string];
-                const serverIp = servers[index]!.server;
+                let serverObject = statusObject[servers[index] as string];
+                const serverIp = servers[index] as string;
                 if (tickInfo.tick !== -1 || !serverObject) {
                     let oldTick = serverObject?.tick || -1;
-                    let operator = servers[index]?.operator || "unknown";
-                    _status.liteServers[serverIp] = {
+                    let operator =
+                        _serverToOperatorMap[servers[index] as string] ||
+                        "unknown";
+                    statusObject[serverIp] = {
                         operator: operator,
                         ipInfo: _ipInfoCache[serverIp] || {},
                         tick: tickInfo.tick,
@@ -251,7 +285,9 @@ namespace NodeService {
                         alignedVotes: tickInfo.alignedVotes,
                         misalignedVotes: tickInfo.misalignedVotes,
                         mainAuxStatus: tickInfo.mainAuxStatus,
-                        groupId: servers[index]?.groupId || "",
+                        groupId: serversLiteNodeDb
+                            ? serversLiteNodeDb[index]?.groupId || ""
+                            : "",
                         isSavingSnapshot: Boolean(tickInfo.isSavingSnapshot),
                         lastUpdated:
                             tickInfo.tick !== -1
@@ -263,74 +299,121 @@ namespace NodeService {
                                 : serverObject?.lastTickChanged || -1,
                     };
 
-                    if (
-                        tickInfo.tick !== -1 &&
-                        !isGotRunningIds[serverIp] &&
-                        (!servers[index]!.groupId ||
-                            servers[index]!.groupId === "")
-                    ) {
-                        // Try to get running IDs from the lite node
-                        isGotRunningIds[serverIp] = true;
-                        NodeService.tryGetIdsFromLiteNode(serverIp).then(
-                            (ids) => {
-                                let groupId = calcGroupIdFromIds(ids);
-                                servers[index]!.groupId = groupId;
-                                Mongodb.getLiteNodeCollection()
-                                    .updateOne(
-                                        {
-                                            server: serverIp,
-                                        },
-                                        {
-                                            $set: {
-                                                ids: ids,
-                                                groupId: groupId,
+                    if (serversLiteNodeDb && serversLiteNodeDb[index]) {
+                        if (
+                            tickInfo.tick !== -1 &&
+                            !isGotRunningIds[serverIp] &&
+                            (!serversLiteNodeDb[index]!.groupId ||
+                                serversLiteNodeDb[index]!.groupId === "")
+                        ) {
+                            // Try to get running IDs from the lite node
+                            isGotRunningIds[serverIp] = true;
+                            NodeService.tryGetIdsFromLiteNode(serverIp).then(
+                                (ids) => {
+                                    let groupId = calcGroupIdFromIds(ids);
+                                    serversLiteNodeDb[index]!.groupId = groupId;
+                                    Mongodb.getLiteNodeCollection()
+                                        .updateOne(
+                                            {
+                                                server: serverIp,
                                             },
-                                        }
-                                    )
-                                    .then()
-                                    .catch(() => {});
-                            }
-                        );
+                                            {
+                                                $set: {
+                                                    ids: ids,
+                                                    groupId: groupId,
+                                                },
+                                            }
+                                        )
+                                        .then()
+                                        .catch(() => {});
+                                }
+                            );
+                        }
                     }
                 }
             });
+        };
 
-            await sleep(IDLE_TIME);
-        }
+        const systemNodesProcessor = async () => {
+            while (true) {
+                let servers: MongoDbTypes.LiteNode[] = [..._currentLiteNodes];
+                // Check removed node and delete them from status object
+                if (
+                    _status.liteServers &&
+                    Object.keys(_status.liteServers).length > 0
+                ) {
+                    Object.keys(_status.liteServers).forEach((server) => {
+                        if (!servers.some((s) => s.server === server)) {
+                            delete _status.liteServers[server];
+                        }
+                    });
+                }
+
+                let startTime = Date.now();
+                await handleFetchAndUpdate(
+                    _status.liteServers,
+                    servers.map((s) => s.server),
+                    servers
+                );
+                logger.info(
+                    `Updated and fetched tick info for ${servers.length} Lite Nodes (System) in ${Date.now() - startTime}ms`
+                );
+
+                await sleep(IDLE_TIME);
+            }
+        };
+
+        const checkinNodesProcessor = async () => {
+            while (true) {
+                let liteNodesFromCheckins = await Checkin.getCheckins({
+                    type: "lite",
+                    normalized: true,
+                    epoch: 0, // latest epoch
+                });
+                // filter out nodes that are already in system nodes to avoid duplication
+                liteNodesFromCheckins = liteNodesFromCheckins.filter(
+                    (c) => !_status.liteServers[c.ip]
+                );
+                let startTime = Date.now();
+                await handleFetchAndUpdate(
+                    _statusCheckin.liteServers,
+                    liteNodesFromCheckins.map((c) => c.ip)
+                );
+                logger.info(
+                    `Updated and fetched check-in info for ${liteNodesFromCheckins.length} Lite Nodes (Checkin) in ${Date.now() - startTime}ms`
+                );
+
+                await sleep(IDLE_TIME);
+            }
+        };
+
+        systemNodesProcessor();
+        checkinNodesProcessor();
     }
 
     async function watchBobNodes() {
-        while (true) {
-            let servers: MongoDbTypes.BobNode[] = [..._currentBobNodes];
-            // Check removed node and delete them from status object
-            if (
-                _status.bobServers &&
-                Object.keys(_status.bobServers).length > 0
-            ) {
-                Object.keys(_status.bobServers).forEach((server) => {
-                    if (!servers.some((s) => s.server === server)) {
-                        delete _status.bobServers[server];
-                    }
-                });
-            }
-
+        const handleFetchAndUpdate = async (
+            statusObject: {
+                [server: string]: BobNodeTickInfo;
+            },
+            servers: string[]
+        ) => {
             // Fetch tick info for each server
             let allPromises = servers.map((server) =>
-                getBobNodeTickInfo(server.server)
+                getBobNodeTickInfo(server)
             );
             let results = await Promise.all(allPromises);
 
             results.forEach((tickInfo, index) => {
-                let serverObject =
-                    _status.bobServers[servers[index]?.server as string];
+                let serverObject = statusObject[servers[index] as string];
                 if (tickInfo.currentFetchingTick !== -1 || !serverObject) {
                     let oldTick = serverObject?.currentFetchingTick || -1;
-                    let operator = servers[index]?.operator || "unknown";
-                    _status.bobServers[servers[index]?.server as string] = {
+                    let operator =
+                        _serverToOperatorMap[servers[index] as string] ||
+                        "unknown";
+                    statusObject[servers[index] as string] = {
                         operator: operator,
-                        ipInfo:
-                            _ipInfoCache[servers[index]?.server as string] ||
-                            {},
+                        ipInfo: _ipInfoCache[servers[index] as string] || {},
                         currentProcessingEpoch: tickInfo.currentProcessingEpoch,
                         currentFetchingTick: tickInfo.currentFetchingTick,
                         currentFetchingLogTick: tickInfo.currentFetchingLogTick,
@@ -350,9 +433,61 @@ namespace NodeService {
                     };
                 }
             });
+        };
 
-            await sleep(IDLE_TIME);
-        }
+        const systemNodesProcessor = async () => {
+            while (true) {
+                let servers: MongoDbTypes.BobNode[] = [..._currentBobNodes];
+                // Check removed node and delete them from status object
+                if (
+                    _status.bobServers &&
+                    Object.keys(_status.bobServers).length > 0
+                ) {
+                    Object.keys(_status.bobServers).forEach((server) => {
+                        if (!servers.some((s) => s.server === server)) {
+                            delete _status.bobServers[server];
+                        }
+                    });
+                }
+                let startTime = Date.now();
+                await handleFetchAndUpdate(
+                    _status.bobServers,
+                    servers.map((s) => s.server)
+                );
+                logger.info(
+                    `Updated and fetched tick info for ${servers.length} Bob Nodes (System) in ${Date.now() - startTime}ms`
+                );
+
+                await sleep(IDLE_TIME);
+            }
+        };
+
+        const checkinNodesProcessor = async () => {
+            while (true) {
+                let bobNodesFromCheckins = await Checkin.getCheckins({
+                    type: "bob",
+                    normalized: true,
+                    epoch: 0, // latest epoch
+                });
+                // filter out nodes that are already in system nodes to avoid duplication
+                bobNodesFromCheckins = bobNodesFromCheckins.filter(
+                    (c) => !_status.bobServers[c.ip]
+                );
+                let startTime = Date.now();
+                await handleFetchAndUpdate(
+                    _statusCheckin.bobServers,
+                    bobNodesFromCheckins.map((c) => c.ip)
+                );
+                logger.info(
+                    `Updated and fetched check-in info for ${bobNodesFromCheckins.length} Bob Nodes (Checkin) in ${Date.now() - startTime}ms`
+                );
+
+                await sleep(IDLE_TIME);
+            }
+        };
+
+        systemNodesProcessor();
+        checkinNodesProcessor();
     }
 
     export async function requestShutdownAllLiteNodes() {
@@ -404,25 +539,16 @@ namespace NodeService {
                 .find({})
                 .toArray()) as MongoDbTypes.Server[];
 
+            // update ip cache for system nodes
             for (let node of [...liteServers, ...bobServers]) {
-                if (!_ipInfoCache[node.server]) {
-                    try {
-                        let fullServerDoc =
-                            await Mongodb.getServersCollection().findOne({
-                                server: node.server,
-                            });
-                        if (fullServerDoc && fullServerDoc.ipInfo) {
-                            _ipInfoCache[node.server] = fullServerDoc.ipInfo;
-                        }
-                    } catch (error) {
-                        logger.error(
-                            `Error fetching IP info for Lite Node ${
-                                node.server
-                            }: ${(error as Error).message}`
-                        );
-                    }
-                }
+                _serverToOperatorMap[node.server] = node.operator || "unknown";
             }
+
+            let serversIpInfo: MongoDbTypes.ServerIpInfo[] =
+                await Mongodb.getServerIpInfoCollection().find({}).toArray();
+            serversIpInfo.forEach((doc) => {
+                _ipInfoCache[doc.server] = doc.ipInfo;
+            });
 
             _currentLiteNodes = liteServers
                 .map((node) => ({ ...node }))
@@ -488,39 +614,53 @@ namespace NodeService {
             mode = "random",
             clientIpInfo,
             filterOut = [],
+            trustedNode = false,
         }: {
             isNeedLoggingPasscode?: boolean;
             mode?: QueryPeersMode;
             clientIpInfo?: IpInfo | null;
             filterOut?: string[];
+            trustedNode?: boolean;
         } = {}
     ) {
-        let servers: MongoDbTypes.LiteNode[] = [..._currentLiteNodes];
+        let servers: string[] = [];
+        if (trustedNode) {
+            servers = Object.keys(_status.liteServers).filter((server) => {
+                return isNodeActive(
+                    _status.liteServers[server]?.lastTickChanged || 0
+                );
+            });
+        } else {
+            servers = Object.keys(_statusCheckin.liteServers).filter(
+                (server) => {
+                    return isNodeActive(
+                        _statusCheckin.liteServers[server]?.lastTickChanged || 0
+                    );
+                }
+            );
+        }
         if (n >= servers.length) {
             return servers;
         }
 
-        let selectedServers: MongoDbTypes.LiteNode[] = [];
+        let selectedServers: string[] = [];
         let usedIndices: Set<number> = new Set();
 
-        const checkIsCandidateNode = (server: MongoDbTypes.LiteNode) => {
-            if (isNeedLoggingPasscode) {
-                return (
-                    isNodeActive(
-                        _status.liteServers[server.server]?.lastTickChanged || 0
-                    ) &&
-                    (!server.passcode || server.passcode.trim() === "0-0-0-0")
-                );
-            } else {
-                return isNodeActive(
-                    _status.liteServers[server.server]?.lastTickChanged || 0
-                );
-            }
-        };
+        // const checkIsCandidateNode = (server: string) => {
+        //     if (isNeedLoggingPasscode) {
+        //         return isNodeActive(
+        //             _status.liteServers[server.server]?.lastTickChanged || 0
+        //         );
+        //         //  &&
+        //         // (!server.passcode || server.passcode.trim() === "0-0-0-0")
+        //     } else {
+        //         return isNodeActive(
+        //             _status.liteServers[server.server]?.lastTickChanged || 0
+        //         );
+        //     }
+        // };
 
-        let candidateServers = servers.filter((server) =>
-            checkIsCandidateNode(server)
-        );
+        let candidateServers = servers;
         let numberOfActiveNodes = candidateServers.length;
 
         if (numberOfActiveNodes < n) {
@@ -530,7 +670,7 @@ namespace NodeService {
         let distanceMap: { server: string; distance: number }[] = [];
         if (mode === "closest" && clientIpInfo) {
             candidateServers.forEach((server) => {
-                let serverIpInfo = _ipInfoCache[server.server];
+                let serverIpInfo = _ipInfoCache[server];
                 if (serverIpInfo) {
                     let distance = geolib.getDistance(
                         {
@@ -542,7 +682,7 @@ namespace NodeService {
                             longitude: serverIpInfo.lon,
                         }
                     );
-                    distanceMap.push({ server: server.server, distance });
+                    distanceMap.push({ server: server, distance });
                 }
             });
 
@@ -551,7 +691,7 @@ namespace NodeService {
 
             // return top n closest nodes that are active
             selectedServers = distanceMap.slice(0, n).map((item) => {
-                return candidateServers.find((s) => s.server === item.server)!;
+                return candidateServers.find((s) => s === item.server)!;
             });
 
             return selectedServers;
@@ -577,34 +717,50 @@ namespace NodeService {
             mode = "random",
             clientIpInfo,
             filterOut = [],
+            trustedNode = false,
         }: {
             mode?: QueryPeersMode;
             clientIpInfo?: IpInfo | null;
             filterOut?: string[];
+            trustedNode?: boolean;
         } = {}
     ) {
-        let servers: MongoDbTypes.BobNode[] = [..._currentBobNodes];
+        let servers: string[] = [];
+        if (trustedNode) {
+            servers = Object.keys(_status.bobServers).filter((server) => {
+                return isNodeActive(
+                    _status.bobServers[server]?.lastTickChanged || 0
+                );
+            });
+        } else {
+            servers = Object.keys(_statusCheckin.bobServers).filter(
+                (server) => {
+                    return isNodeActive(
+                        _statusCheckin.bobServers[server]?.lastTickChanged || 0
+                    );
+                }
+            );
+        }
+        if (n >= servers.length) {
+            return servers;
+        }
 
-        servers = servers.filter(
-            (server) => !filterOut.includes(server.server)
-        );
+        servers = servers.filter((server) => !filterOut.includes(server));
 
         if (n >= servers.length) {
             return servers;
         }
 
-        let selectedServers: MongoDbTypes.BobNode[] = [];
+        let selectedServers: string[] = [];
         let usedIndices: Set<number> = new Set();
 
-        const checkIsCandidateNode = (server: MongoDbTypes.BobNode) => {
-            return isNodeActive(
-                _status.bobServers[server.server]?.lastTickChanged || 0
-            );
-        };
+        // const checkIsCandidateNode = (server: MongoDbTypes.BobNode) => {
+        //     return isNodeActive(
+        //         _status.bobServers[server.server]?.lastTickChanged || 0
+        //     );
+        // };
 
-        let candidateServers = servers.filter((server) =>
-            checkIsCandidateNode(server)
-        );
+        let candidateServers = servers;
         let numberOfActiveNodes = candidateServers.length;
 
         if (numberOfActiveNodes < n) {
@@ -614,7 +770,7 @@ namespace NodeService {
         let distanceMap: { server: string; distance: number }[] = [];
         if (mode === "closest" && clientIpInfo) {
             candidateServers.forEach((server) => {
-                let serverIpInfo = _ipInfoCache[server.server];
+                let serverIpInfo = _ipInfoCache[server];
                 if (serverIpInfo) {
                     let distance = geolib.getDistance(
                         {
@@ -626,7 +782,7 @@ namespace NodeService {
                             longitude: serverIpInfo.lon,
                         }
                     );
-                    distanceMap.push({ server: server.server, distance });
+                    distanceMap.push({ server: server, distance });
                 }
             });
 
@@ -635,7 +791,7 @@ namespace NodeService {
 
             // return top n closest nodes that are active
             selectedServers = distanceMap.slice(0, n).map((item) => {
-                return candidateServers.find((s) => s.server === item.server)!;
+                return candidateServers.find((s) => s === item.server)!;
             });
 
             return selectedServers;

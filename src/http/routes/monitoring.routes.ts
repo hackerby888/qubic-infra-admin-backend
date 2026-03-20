@@ -21,16 +21,20 @@ router.get("/random-peers", async (req, res) => {
                 waitForLookup: true,
             });
         }
+
         let expectedLitePeersLength = parseInt(req.query.litePeers as string);
         let expectedBobPeersLength = parseInt(req.query.bobPeers as string);
         const mode: QueryPeersMode =
             (req.query.mode as QueryPeersMode) || "random";
+        const trustedNode: boolean = req.query.trustedNode === "true";
         let service = req.query.service as MongoDbTypes.ServiceType;
+
         if (service == MongoDbTypes.ServiceType.LiteNode) {
             let peers = NodeService.getRandomLiteNode(expectedLitePeersLength, {
                 mode,
                 clientIpInfo: clientIpInfo,
-            }).map((peer) => peer.server);
+                trustedNode,
+            });
             res.json({ peers: peers });
         } else if (service == MongoDbTypes.ServiceType.BobNode) {
             let litePeers = NodeService.getRandomLiteNode(
@@ -39,16 +43,18 @@ router.get("/random-peers", async (req, res) => {
                     isNeedLoggingPasscode: true,
                     clientIpInfo: clientIpInfo,
                     mode,
+                    trustedNode,
                 }
-            ).map((peer) => peer.server);
+            );
             let bobPeers = NodeService.getRandomBobNode(
                 expectedBobPeersLength,
                 {
                     clientIpInfo: clientIpInfo,
                     mode,
                     filterOut: litePeers,
+                    trustedNode,
                 }
-            ).map((peer) => peer.server);
+            );
             res.json({
                 litePeers: litePeers,
                 bobPeers: bobPeers,

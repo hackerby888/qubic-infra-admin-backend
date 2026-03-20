@@ -33,7 +33,7 @@ export namespace SocketServer {
                     .toArray();
 
                 for (const socket of connectingRealtimeSockets) {
-                    let statuses = NodeService.getStatus();
+                    let statuses = NodeService.getSystemNodesStatus();
 
                     if (socket.operator && socket.operator !== "admin") {
                         // Filter statuses by operator (get all nodes if admin)

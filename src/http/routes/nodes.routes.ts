@@ -12,7 +12,7 @@ router.get("/servers-status", async (req, res) => {
     let operator = req.query.operator as string | undefined;
     let needPlainIp = req.query.plainIp === "true";
     let needAll = req.query.all === "true";
-    let statuses = NodeService.getStatus();
+    let statuses = NodeService.getSystemNodesStatus();
 
     if (needPlainIp) {
         let token = req.headers["authorization"]?.split(" ")[1];
@@ -40,9 +40,7 @@ router.get("/servers-status", async (req, res) => {
     let liteNodesServer: string[] = statuses.liteNodes.map(
         (node) => node.server
     );
-    let bobNodesServer: string[] = statuses.bobNodes.map(
-        (node) => node.server
-    );
+    let bobNodesServer: string[] = statuses.bobNodes.map((node) => node.server);
 
     let liteNodesFromDb = await Mongodb.getLiteNodeCollection()
         .find({ server: { $in: liteNodesServer } })
@@ -109,46 +107,66 @@ router.get("/servers-status", async (req, res) => {
     res.json({ ...statuses });
 });
 
-router.post(
-    "/change-visibility",
-    authenticateToken,
-    async (req, res) => {
-        try {
-            let server: string = req.body.server;
-            let service: MongoDbTypes.ServiceType = req.body.service;
-            let isPrivate: boolean = req.body.isPrivate;
-            let operator = req.user!.username;
-            if (!operator) {
-                res.status(400).json({ error: "No operator found" });
-                return;
-            }
-            if (!server) {
-                res.status(400).json({ error: "Missing server" });
-                return;
-            }
-            if (service === MongoDbTypes.ServiceType.LiteNode) {
-                await Mongodb.getLiteNodeCollection().updateOne(
-                    { server: server },
-                    { $set: { isPrivate: !!isPrivate } }
-                );
-            } else if (service === MongoDbTypes.ServiceType.BobNode) {
-                await Mongodb.getBobNodeCollection().updateOne(
-                    { server: server },
-                    { $set: { isPrivate: !!isPrivate } }
-                );
-            } else {
-                res.status(400).json({ error: "Invalid service type" });
-                return;
-            }
-            res.json({ message: "Visibility updated successfully" });
-        } catch (error) {
-            logger.error(
-                `Error changing visibility: ${(error as Error).message}`
-            );
-            res.status(500).json({ error: "Internal server error" });
-        }
+router.get("/checkin-nodes-status", async (req, res) => {
+    try {
+        res.json(NodeService.getCheckinNodesStatus());
+    } catch (error) {
+        logger.error(
+            `Error fetching checkin nodes status: ${(error as Error).message}`
+        );
+        res.status(500).json({
+            error: "Failed to fetch checkin nodes status " + error,
+        });
     }
-);
+});
+
+router.get("/system-nodes-status", async (req, res) => {
+    try {
+        res.json(NodeService.getSystemNodesStatus());
+    } catch (error) {
+        logger.error(
+            `Error fetching system nodes status: ${(error as Error).message}`
+        );
+        res.status(500).json({
+            error: "Failed to fetch system nodes status " + error,
+        });
+    }
+});
+
+router.post("/change-visibility", authenticateToken, async (req, res) => {
+    try {
+        let server: string = req.body.server;
+        let service: MongoDbTypes.ServiceType = req.body.service;
+        let isPrivate: boolean = req.body.isPrivate;
+        let operator = req.user!.username;
+        if (!operator) {
+            res.status(400).json({ error: "No operator found" });
+            return;
+        }
+        if (!server) {
+            res.status(400).json({ error: "Missing server" });
+            return;
+        }
+        if (service === MongoDbTypes.ServiceType.LiteNode) {
+            await Mongodb.getLiteNodeCollection().updateOne(
+                { server: server },
+                { $set: { isPrivate: !!isPrivate } }
+            );
+        } else if (service === MongoDbTypes.ServiceType.BobNode) {
+            await Mongodb.getBobNodeCollection().updateOne(
+                { server: server },
+                { $set: { isPrivate: !!isPrivate } }
+            );
+        } else {
+            res.status(400).json({ error: "Invalid service type" });
+            return;
+        }
+        res.json({ message: "Visibility updated successfully" });
+    } catch (error) {
+        logger.error(`Error changing visibility: ${(error as Error).message}`);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
 
 router.get("/request-shudown", async (req, res) => {
     let server = req.query.server as string;

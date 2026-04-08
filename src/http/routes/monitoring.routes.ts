@@ -34,6 +34,7 @@ router.get("/random-peers", async (req, res) => {
                 mode,
                 clientIpInfo: clientIpInfo,
                 trustedNode,
+                filterOut: [clientIpV4 as string],
             });
             res.json({ peers: peers });
         } else if (service == MongoDbTypes.ServiceType.BobNode) {
@@ -44,6 +45,7 @@ router.get("/random-peers", async (req, res) => {
                     clientIpInfo: clientIpInfo,
                     mode,
                     trustedNode,
+                    filterOut: [clientIpV4 as string],
                 }
             );
             let bobPeers = NodeService.getRandomBobNode(
@@ -51,7 +53,7 @@ router.get("/random-peers", async (req, res) => {
                 {
                     clientIpInfo: clientIpInfo,
                     mode,
-                    filterOut: litePeers,
+                    filterOut: [...litePeers, clientIpV4 as string],
                     trustedNode,
                 }
             );

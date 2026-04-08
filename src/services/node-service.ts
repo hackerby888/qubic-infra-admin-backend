@@ -644,6 +644,10 @@ namespace NodeService {
                 }
             );
         }
+
+        // filter out servers in filterOut list
+        servers = servers.filter((server) => !filterOut.includes(server));
+
         if (n >= servers.length) {
             return servers;
         }

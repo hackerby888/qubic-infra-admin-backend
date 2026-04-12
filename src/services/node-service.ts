@@ -1,6 +1,7 @@
 import { Mongodb, MongoDbTypes } from "../database/db.js";
 import type { QueryPeersMode } from "../types/type.js";
 import { isNodeActive } from "../utils/common.js";
+import { Gmail } from "../utils/gmail.js";
 import type { IpInfo } from "../utils/ip.js";
 import { logger } from "../utils/logger.js";
 import { calcGroupIdFromIds } from "../utils/node.js";
@@ -922,11 +923,35 @@ namespace NodeService {
         }
     }
 
+    async function watchMainNode() {
+        while (true) {
+            let systemNodesStatus = NodeService.getSystemNodesStatus();
+            let mainNodes = systemNodesStatus.liteNodes.filter(
+                (node) => (node.mainAuxStatus & 1) === 1 && node.epoch != -1
+            );
+            let systemTick = NodeService.getNetworkStatus().tick;
+            for (let node of mainNodes) {
+                if (systemTick - node.tick > 64) {
+                    logger.warn(
+                        `Main node ${node.server} is lagging behind. System tick: ${systemTick}, Node tick: ${node.tick}`
+                    );
+                    Gmail.sendNodeStatusEmail({
+                        behindTicks: systemTick - node.tick,
+                        nodeIp: node.server,
+                        to: "lvp123321123321@gmail.com",
+                    });
+                }
+            }
+            await sleep(30_000);
+        }
+    }
+
     export async function start() {
         await pullServerLists();
         watchLiteNodes();
         watchBobNodes();
         watchAndSaveSnapshot();
+        watchMainNode();
     }
 }
 

@@ -22,6 +22,8 @@ function checkEnvVariables() {
         "PORT",
         "MONGO_URI",
         "MONGO_DB_NAME",
+        "GMAIL_USER",
+        "GMAIL_APP_PASSWORD",
     ];
 
     requiredVars.forEach((varName) => {

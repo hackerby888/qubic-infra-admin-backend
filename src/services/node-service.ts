@@ -931,7 +931,7 @@ namespace NodeService {
             );
             let systemTick = NodeService.getNetworkStatus().tick;
             for (let node of mainNodes) {
-                if (systemTick - node.tick > 64) {
+                if (systemTick - node.tick > 8) {
                     logger.warn(
                         `Main node ${node.server} is lagging behind. System tick: ${systemTick}, Node tick: ${node.tick}`
                     );

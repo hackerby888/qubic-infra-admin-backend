@@ -1010,4 +1010,90 @@ export namespace SSHService {
         // Currently, executeCommands is called directly in each API request handler.
         // If needed, implement a queue processor here to handle requests sequentially.
     }
+
+    /**
+     * Opens an interactive PTY shell on a remote server for use as an SSH console.
+     * Returns control functions (write, resize, close) or throws on connection failure.
+     * This function does NOT use execution locks — it is independent of command execution.
+     */
+    export async function openSshConsole(
+        host: string,
+        username: string,
+        password: string,
+        options: {
+            sshPrivateKey?: string;
+            cols?: number;
+            rows?: number;
+            onData: (data: Buffer) => void;
+            onClose: () => void;
+            onError: (err: Error) => void;
+        }
+    ): Promise<{
+        write: (data: string) => void;
+        resize: (cols: number, rows: number) => void;
+        close: () => void;
+    }> {
+        const port = await _getServerSSHPort(host);
+        const conn = new Client();
+
+        return new Promise((resolve, reject) => {
+            conn.on("ready", () => {
+                conn.shell(
+                    {
+                        term: "xterm-256color",
+                        cols: options.cols ?? 80,
+                        rows: options.rows ?? 24,
+                    },
+                    (err, stream) => {
+                        if (err) {
+                            conn.end();
+                            return reject(err);
+                        }
+
+                        stream.on("data", (data: Buffer) => {
+                            options.onData(data);
+                        });
+
+                        stream.on("close", () => {
+                            conn.end();
+                            options.onClose();
+                        });
+
+                        stream.stderr.on("data", (data: Buffer) => {
+                            options.onData(data);
+                        });
+
+                        resolve({
+                            write: (data: string) => {
+                                stream.write(data);
+                            },
+                            resize: (cols: number, rows: number) => {
+                                stream.setWindow(rows, cols, 0, 0);
+                            },
+                            close: () => {
+                                try {
+                                    stream.end();
+                                    conn.end();
+                                } catch (_) {}
+                            },
+                        });
+                    }
+                );
+            });
+
+            conn.on("error", (err) => {
+                options.onError(err);
+                reject(err);
+            });
+
+            conn.connect({
+                host,
+                port,
+                username,
+                password,
+                privateKey: (options.sshPrivateKey || "").replace(/\\n/g, "\n"),
+                readyTimeout: 30_000,
+            });
+        });
+    }
 }

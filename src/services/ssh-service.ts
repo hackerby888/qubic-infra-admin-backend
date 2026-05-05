@@ -88,6 +88,7 @@ export namespace SSHService {
             ids,
             loggingPasscode,
             operatorId,
+            customParameter,
         }: {
             binaryUrl: string;
             epochFile: string;
@@ -97,8 +98,9 @@ export namespace SSHService {
             ids?: string[];
             loggingPasscode?: string;
             operatorId?: string;
+            customParameter?: string;
         }) {
-            const FINAL_START_COMMAND = `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS $SEEDS_ARG --node-mode $MAIN_AUX_STATUS --reader-passcode $LOGGING_PASSCODE --operator $OPERATOR_ID || exec bash"`;
+            const FINAL_START_COMMAND = `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS $SEEDS_ARG --node-mode $MAIN_AUX_STATUS --reader-passcode $LOGGING_PASSCODE --operator $OPERATOR_ID $CUSTOM_PARAMETER || exec bash"`;
             // If isRestart is true, skip setup steps and just start the node with existing configs
             if (isRestart) {
                 return [
@@ -110,6 +112,7 @@ export namespace SSHService {
                     `MAIN_AUX_STATUS=$(cat main_aux_status.txt)`,
                     `LOGGING_PASSCODE=$(cat logging_passcode.txt)`,
                     `OPERATOR_ID=$(cat operator_id.txt)`,
+                    `CUSTOM_PARAMETER=$(cat custom_parameter.txt 2>/dev/null || echo "")`,
                     `SEEDS_ARG="\${IDS:+--seeds $IDS}"`,
                     FINAL_START_COMMAND,
                 ];
@@ -135,12 +138,14 @@ export namespace SSHService {
                 `echo "${mainAuxStatus || 0}" > main_aux_status.txt`,
                 `echo "${loggingPasscode}" > logging_passcode.txt`,
                 `echo "${operatorId}" > operator_id.txt`,
+                `echo "${customParameter || ""}" > custom_parameter.txt`,
                 `OPERATOR_ID=$(cat operator_id.txt)`,
                 `LOGGING_PASSCODE=$(cat logging_passcode.txt)`,
                 `CURRENT_PEERS=$(cat peers.txt)`,
                 `CURRENT_BINARY=$(cat binary_name.txt)`,
                 `IDS=$(cat ids.txt)`,
                 `MAIN_AUX_STATUS=$(cat main_aux_status.txt)`,
+                `CUSTOM_PARAMETER=$(cat custom_parameter.txt 2>/dev/null || echo "")`,
                 `SEEDS_ARG="\${IDS:+--seeds $IDS}"`,
                 FINAL_START_COMMAND,
             ];
@@ -578,6 +583,7 @@ export namespace SSHService {
             keydbConfig,
             kvrocksConfig,
             keepOldConfig,
+            customParameter,
         }: {
             binaryUrl: string;
             epochFile: string;
@@ -592,6 +598,7 @@ export namespace SSHService {
             keydbConfig: string[];
             kvrocksConfig: string[];
             keepOldConfig: boolean;
+            customParameter?: string;
         }
     ) {
         const returnFailedObject: {
@@ -622,6 +629,7 @@ export namespace SSHService {
                         ids,
                         loggingPasscode,
                         operatorId,
+                        customParameter: customParameter ?? "",
                     })
                 );
             } else if (type === MongoDbTypes.ServiceType.BobNode) {

@@ -59,6 +59,7 @@ export namespace MongoDbTypes {
         groupId?: string;
         isPrivate: boolean;
         passcode?: string;
+        customParameter?: string;
     }
 
     export interface BobNode {

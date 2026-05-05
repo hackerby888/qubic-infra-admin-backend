@@ -278,6 +278,15 @@ router.post("/deploy", authenticateToken, async (req, res) => {
         }
     }
 
+    // Fetch customParameter for all lite nodes in this deployment
+    let liteNodeDocs = await Mongodb.getLiteNodeCollection()
+        .find({ server: { $in: servers } })
+        .toArray();
+    let customParameterMap: Record<string, string> = {};
+    for (let doc of liteNodeDocs) {
+        customParameterMap[doc.server] = doc.customParameter || "";
+    }
+
     // Deploy to each server
     try {
         for (let server of serverDocs) {
@@ -307,6 +316,7 @@ router.post("/deploy", authenticateToken, async (req, res) => {
                     keydbConfig: extraData.keydbConfig || [],
                     kvrocksConfig: extraData.kvrocksConfig || [],
                     keepOldConfig: extraData.keepOldConfig || false,
+                    customParameter: customParameterMap[server.server] ?? "",
                 }
             )
                 .then((result) => {

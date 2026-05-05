@@ -168,6 +168,67 @@ router.post("/change-visibility", authenticateToken, async (req, res) => {
     }
 });
 
+router.get("/lite-node-custom-parameter", authenticateToken, async (req, res) => {
+    try {
+        let server = req.query.server as string;
+        if (!server) {
+            res.status(400).json({ error: "Missing server" });
+            return;
+        }
+        let doc = await Mongodb.getLiteNodeCollection().findOne({ server });
+        res.json({ customParameter: doc?.customParameter || "" });
+    } catch (error) {
+        logger.error(
+            `Error getting custom parameter: ${(error as Error).message}`
+        );
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+router.post(
+    "/set-lite-node-custom-parameter",
+    authenticateToken,
+    async (req, res) => {
+        try {
+            let operator = req.user!.username;
+            let { server, customParameter } = req.body as {
+                server: string;
+                customParameter: string;
+            };
+            if (!server) {
+                res.status(400).json({ error: "Missing server" });
+                return;
+            }
+            if (typeof customParameter !== "string") {
+                res.status(400).json({ error: "customParameter must be a string" });
+                return;
+            }
+
+            // Verify the server belongs to the operator (or caller is admin)
+            let serverDoc = await Mongodb.getServersCollection().findOne({
+                server,
+                ...(operator !== "admin" ? { operator } : {}),
+            });
+            if (!serverDoc) {
+                res.status(404).json({ error: "Server not found" });
+                return;
+            }
+
+            await Mongodb.getLiteNodeCollection().updateOne(
+                { server },
+                { $set: { customParameter } },
+                { upsert: true }
+            );
+            res.json({ message: "Custom parameter updated successfully" });
+        } catch (error) {
+            logger.error(
+                `Error setting custom parameter: ${(error as Error).message}`
+            );
+            res.status(500).json({ error: "Internal server error" });
+        }
+    }
+);
+
 router.get("/request-shudown", async (req, res) => {
     let server = req.query.server as string;
     if (!server) {

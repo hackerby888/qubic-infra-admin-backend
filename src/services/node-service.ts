@@ -923,24 +923,56 @@ namespace NodeService {
         }
     }
 
+    const LAG_THRESHOLD_TICKS = 8;
+    const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 min between repeat alerts for same node
+    const lastAlertSentAt: Record<string, number> = {};
+    const alertingNodes = new Set<string>();
+
     async function watchMainNode() {
         while (true) {
-            let systemNodesStatus = NodeService.getSystemNodesStatus();
-            let mainNodes = systemNodesStatus.liteNodes.filter(
-                (node) => (node.mainAuxStatus & 1) === 1 && node.epoch != -1
-            );
-            let systemTick = NodeService.getNetworkStatus().tick;
-            for (let node of mainNodes) {
-                if (systemTick - node.tick > 8) {
-                    logger.warn(
-                        `Main node ${node.server} is lagging behind. System tick: ${systemTick}, Node tick: ${node.tick}`
-                    );
-                    Gmail.sendNodeStatusEmail({
-                        behindTicks: systemTick - node.tick,
-                        nodeIp: node.server,
-                        to: "lvp123321123321@gmail.com",
-                    });
+            try {
+                const systemNodesStatus = NodeService.getSystemNodesStatus();
+                const mainNodes = systemNodesStatus.liteNodes.filter(
+                    (node) =>
+                        (node.mainAuxStatus & 1) === 1 && node.epoch != -1
+                );
+                const systemTick = NodeService.getNetworkStatus().tick;
+                const now = Date.now();
+                const currentlyLagging = new Set<string>();
+
+                for (const node of mainNodes) {
+                    const behind = systemTick - node.tick;
+                    if (behind > LAG_THRESHOLD_TICKS) {
+                        currentlyLagging.add(node.server);
+                        const last = lastAlertSentAt[node.server] || 0;
+                        if (now - last >= ALERT_COOLDOWN_MS) {
+                            logger.warn(
+                                `Main node ${node.server} is lagging behind. System tick: ${systemTick}, Node tick: ${node.tick}`
+                            );
+                            lastAlertSentAt[node.server] = now;
+                            alertingNodes.add(node.server);
+                            Gmail.sendMainNodeLaggingEmail({
+                                behindTicks: behind,
+                                nodeIp: node.server,
+                            });
+                        }
+                    }
                 }
+
+                for (const server of Array.from(alertingNodes)) {
+                    if (!currentlyLagging.has(server)) {
+                        alertingNodes.delete(server);
+                        delete lastAlertSentAt[server];
+                        logger.info(
+                            `Main node ${server} has recovered (back in sync).`
+                        );
+                        Gmail.sendMainNodeRecoveredEmail({ nodeIp: server });
+                    }
+                }
+            } catch (error) {
+                logger.error(
+                    `Error in watchMainNode: ${(error as Error).message}`
+                );
             }
             await sleep(30_000);
         }

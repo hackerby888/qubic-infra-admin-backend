@@ -8,6 +8,7 @@ import { MapService } from "./services/map-service.js";
 import { lastCheckinMap } from "./utils/common.js";
 import fs from "fs/promises";
 import { logger } from "./utils/logger.js";
+import { Gmail } from "./utils/gmail.js";
 
 const LAST_CHECKIN_MAP_FILE = `${process.cwd()}/data/lastCheckinMap.json`;
 
@@ -24,6 +25,7 @@ function checkEnvVariables() {
         "MONGO_DB_NAME",
         "GMAIL_USER",
         "GMAIL_APP_PASSWORD",
+        "ALERT_EMAIL_RECIPIENTS",
     ];
 
     requiredVars.forEach((varName) => {
@@ -54,8 +56,10 @@ async function dataSetup() {
     }
 }
 
-// catch when crash/shutdown/restart
-process.on("SIGINT", async () => {
+let shuttingDown = false;
+async function handleShutdown(signal: string) {
+    if (shuttingDown) return;
+    shuttingDown = true;
     try {
         await fs.writeFile(
             LAST_CHECKIN_MAP_FILE,
@@ -65,19 +69,32 @@ process.on("SIGINT", async () => {
     } catch (err: any) {
         logger.error("❌ Error saving lastCheckinMap:", err.message);
     }
-    logger.info("👋 Shutting down...");
+    try {
+        await Gmail.sendServerStoppedEmail({ reason: signal });
+    } catch (err: any) {
+        logger.error("📧 Failed to send shutdown email:", err.message);
+    }
+    logger.info(`👋 Shutting down (${signal})...`);
     process.exit(0);
-});
+}
+
+// catch when crash/shutdown/restart
+process.on("SIGINT", () => handleShutdown("SIGINT"));
+process.on("SIGTERM", () => handleShutdown("SIGTERM"));
 
 async function main() {
     await dataSetup();
     checkEnvVariables();
     await Mongodb.connectDB();
+    await Gmail.verify();
     await MapService.start();
     await GithubService.start();
     await NodeService.start();
     const server = await HttpServer.start();
     SocketServer.start(server);
+    Gmail.sendServerStartedEmail({
+        port: process.env.PORT || "unknown",
+    }).catch(() => {});
 }
 
 main();

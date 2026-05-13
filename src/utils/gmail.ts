@@ -7,6 +7,9 @@ const transporter = nodemailer.createTransport({
         user: process.env.GMAIL_USER,
         pass: process.env.GMAIL_APP_PASSWORD,
     },
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 15_000,
 });
 
 function getAlertRecipients(): string[] {
@@ -18,9 +21,15 @@ function getAlertRecipients(): string[] {
 
 export namespace Gmail {
     let verified = false;
-    export async function verify(): Promise<boolean> {
+    export async function verify(timeoutMs = 15_000): Promise<boolean> {
         try {
-            await transporter.verify();
+            const timeout = new Promise<never>((_, reject) =>
+                setTimeout(
+                    () => reject(new Error(`verify timed out after ${timeoutMs}ms`)),
+                    timeoutMs
+                )
+            );
+            await Promise.race([transporter.verify(), timeout]);
             verified = true;
             logger.info("📧 Gmail transporter verified.");
             return true;

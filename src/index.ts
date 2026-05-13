@@ -70,7 +70,10 @@ async function handleShutdown(signal: string) {
         logger.error("❌ Error saving lastCheckinMap:", err.message);
     }
     try {
-        await Gmail.sendServerStoppedEmail({ reason: signal });
+        await Promise.race([
+            Gmail.sendServerStoppedEmail({ reason: signal }),
+            new Promise((resolve) => setTimeout(resolve, 5_000)),
+        ]);
     } catch (err: any) {
         logger.error("📧 Failed to send shutdown email:", err.message);
     }
@@ -86,7 +89,8 @@ async function main() {
     await dataSetup();
     checkEnvVariables();
     await Mongodb.connectDB();
-    await Gmail.verify();
+    // Don't block boot on SMTP — production firewalls may block egress.
+    Gmail.verify().catch(() => {});
     await MapService.start();
     await GithubService.start();
     await NodeService.start();

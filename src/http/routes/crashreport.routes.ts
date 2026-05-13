@@ -1,19 +1,53 @@
 import express from "express";
 import { Mongodb, MongoDbTypes } from "../../database/db.js";
+import { authenticateToken } from "../middleware/auth.middleware.js";
 
 const router = express.Router();
 
-router.get("/crash-reports", async (req, res) => {
+router.get("/crash-reports", authenticateToken, async (req, res) => {
     try {
-        let query: any = {};
-        for (const key in req.query) {
-            query[key] = req.query[key];
+        const query: any = {};
+
+        if (typeof req.query.type === "string" && req.query.type.length > 0) {
+            query.type = req.query.type;
         }
-        const crashReports = await Mongodb.getCrashReportsCollection()
-            .find(query as any)
+        if (typeof req.query.ip === "string" && req.query.ip.length > 0) {
+            query.ip = req.query.ip;
+        }
+
+        const timestampFilter: { $gte?: number; $lte?: number } = {};
+        const sinceDays = Number(req.query.sinceDays);
+        if (!Number.isNaN(sinceDays) && sinceDays > 0) {
+            timestampFilter.$gte =
+                Date.now() - sinceDays * 24 * 60 * 60 * 1000;
+        }
+        const since = Number(req.query.since);
+        if (!Number.isNaN(since) && since > 0) {
+            timestampFilter.$gte = since;
+        }
+        const until = Number(req.query.until);
+        if (!Number.isNaN(until) && until > 0) {
+            timestampFilter.$lte = until;
+        }
+        if (Object.keys(timestampFilter).length > 0) {
+            query.timestamp = timestampFilter;
+        }
+
+        let limit = Number(req.query.limit);
+        if (Number.isNaN(limit) || limit <= 0) limit = 500;
+        limit = Math.min(limit, 5000);
+
+        const cursor = Mongodb.getCrashReportsCollection()
+            .find(query, { projection: { _id: 0 } })
             .sort({ timestamp: -1 })
-            .toArray();
-        res.status(200).json(crashReports);
+            .limit(limit);
+
+        const [items, total] = await Promise.all([
+            cursor.toArray(),
+            Mongodb.getCrashReportsCollection().countDocuments(query),
+        ]);
+
+        res.status(200).json({ items, total, limit });
     } catch (error) {
         res.status(500).json({ message: "Failed to retrieve crash reports" });
     }

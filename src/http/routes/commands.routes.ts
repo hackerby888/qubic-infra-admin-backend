@@ -1,10 +1,60 @@
 import express from "express";
+import crypto from "crypto";
 import { Mongodb, MongoDbTypes } from "../../database/db.js";
 import { logger } from "../../utils/logger.js";
 import { authenticateToken } from "../middleware/auth.middleware.js";
 import { SSHService } from "../../services/ssh-service.js";
 import { v4 as uuidv4 } from "uuid";
 import { millisToSeconds } from "../../utils/time.js";
+
+const TTYD_PORT = 7681;
+const TTYD_URL =
+    "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64";
+
+// Stops any running ttyd (screen session + process). Used by both install
+// and uninstall — install needs this because the binary is "Text file busy"
+// while ttyd is executing and wget can't overwrite it.
+function buildTtydStopCommands() {
+    return [
+        `for s in $(screen -ls | awk '/ttyd/ {print $1}'); do screen -S "$s" -X quit || true; done`,
+        `pkill -f /usr/local/bin/ttyd || true`,
+        `for i in 1 2 3 4 5; do pgrep -x ttyd >/dev/null || break; sleep 1; pkill -9 -x ttyd || true; done`,
+    ];
+}
+
+function buildTtydUninstallCommands() {
+    return [
+        ...buildTtydStopCommands(),
+        // Intentionally NOT removing /etc/ttyd-cert.pem + /etc/ttyd-key.pem —
+        // keeping them across uninstall/reinstall cycles means the operator's
+        // browser-trust survives, so they aren't prompted to accept the cert
+        // again every time. Delete them manually if you really want fresh ones.
+        `rm -f /usr/local/bin/ttyd`,
+        `echo "ttyd uninstalled (TLS cert preserved at /etc/ttyd-cert.pem)"`,
+    ];
+}
+
+function buildTtydInstallCommands(token: string, host: string) {
+    const isIp = /^\d+\.\d+\.\d+\.\d+$/.test(host);
+    const san = isIp ? `IP:${host}` : `DNS:${host}`;
+    return [
+        // First, uninstall any existing ttyd — but keep the TLS cert so the
+        // operator doesn't have to re-trust it in their browser every reinstall.
+        ...buildTtydStopCommands(),
+        `rm -f /usr/local/bin/ttyd`,
+        `wget -q -O /usr/local/bin/ttyd ${TTYD_URL}`,
+        `chmod +x /usr/local/bin/ttyd`,
+        // Make sure openssl is available (most Ubuntu images already have it).
+        `command -v openssl >/dev/null 2>&1 || { apt-get update -y >/dev/null && apt-get install -y openssl >/dev/null; }`,
+        // Generate a self-signed cert with the node IP in the SAN, but only
+        // if one isn't already present — that way reinstalling ttyd doesn't
+        // invalidate the cert the operator already trusted in their browser.
+        `if [ ! -f /etc/ttyd-cert.pem ] || [ ! -f /etc/ttyd-key.pem ]; then openssl req -x509 -newkey rsa:2048 -days 3650 -nodes -keyout /etc/ttyd-key.pem -out /etc/ttyd-cert.pem -subj "/CN=${host}" -addext "subjectAltName=${san}" >/dev/null 2>&1 && chmod 600 /etc/ttyd-key.pem && echo "Generated self-signed cert for ${host}"; else echo "Reusing existing /etc/ttyd-cert.pem"; fi`,
+        `screen -dmS ttyd bash -lc "/usr/local/bin/ttyd -W -p ${TTYD_PORT} -b /${token} -S -C /etc/ttyd-cert.pem -K /etc/ttyd-key.pem bash -l || exec bash"`,
+        // Probe the port to confirm ttyd actually bound; bash's /dev/tcp is always available.
+        `sleep 2 && bash -c "exec 3<>/dev/tcp/127.0.0.1/${TTYD_PORT}" 2>/dev/null && echo "ttyd listening on :${TTYD_PORT}/${token} (TLS)" || (echo "ttyd is NOT listening on :${TTYD_PORT}" && screen -ls && exit 1)`,
+    ];
+}
 
 const router = express.Router();
 
@@ -333,6 +383,22 @@ router.post("/execute-command", authenticateToken, async (req, res) => {
                     `chmod +x $(basename ${url})`,
                 ];
             },
+            "placebinary:lite": (url: string) => {
+                if (!url || !url.startsWith("http")) {
+                    throw new Error("Invalid URL for binary");
+                }
+                return [
+                    `cd ~/qlite/`,
+                    // Remove the previous binary tracked in binary_name.txt so we
+                    // don't accumulate dead files. Don't fail if it isn't there.
+                    `OLD_BINARY=$(cat binary_name.txt 2>/dev/null || echo "")`,
+                    `[ -n "$OLD_BINARY" ] && rm -f "$OLD_BINARY" || true`,
+                    `wget ${url}`,
+                    `chmod +x $(basename ${url})`,
+                    // Persist the new binary name so the restart command picks it up.
+                    `basename ${url} > binary_name.txt`,
+                ];
+            },
             "restartkeydb:bob": () => {
                 return [
                     `while pgrep -x keydb-server >/dev/null; do { echo "Waiting for keydb to be shutdown..."; sleep 1; pkill -2 keydb-server || true; }; done`,
@@ -510,30 +576,53 @@ router.post("/execute-command", authenticateToken, async (req, res) => {
         };
 
         let commandsToBeExecuted: string[] = [];
-        // if (command in QUICKS_COMMANDS_MAP) {
-        //     commandsToBeExecuted =
-        //         QUICKS_COMMANDS_MAP[
-        //             command as keyof typeof QUICKS_COMMANDS_MAP
-        //         ];
-        // } else {
-        //     commandsToBeExecuted = [command];
-        // }
-        for (let cmdKey in QUICKS_COMMANDS_MAP) {
-            if (command.startsWith(cmdKey)) {
-                let cmdFunc =
-                    QUICKS_COMMANDS_MAP[
-                        cmdKey as keyof typeof QUICKS_COMMANDS_MAP
-                    ];
-
-                let params: string[] = command.split("::")[1]?.split(",") || [];
-
-                // @ts-ignore
-                commandsToBeExecuted = cmdFunc(...params);
-                break;
+        let perServerCommands: { [server: string]: string[] } = {};
+        if (command === "installttyd:server") {
+            for (let s of serverDocs) {
+                const token = crypto.randomBytes(24).toString("hex");
+                await Mongodb.getServersCollection().updateOne(
+                    { server: s.server },
+                    {
+                        $set: {
+                            ttyd: {
+                                token,
+                                port: TTYD_PORT,
+                            },
+                        },
+                    }
+                );
+                perServerCommands[s.server] = buildTtydInstallCommands(
+                    token,
+                    s.server
+                );
             }
-        }
-        if (commandsToBeExecuted.length === 0) {
-            commandsToBeExecuted = [command];
+        } else if (command === "uninstallttyd:server") {
+            for (let s of serverDocs) {
+                await Mongodb.getServersCollection().updateOne(
+                    { server: s.server },
+                    { $unset: { ttyd: "" } }
+                );
+                perServerCommands[s.server] = buildTtydUninstallCommands();
+            }
+        } else {
+            for (let cmdKey in QUICKS_COMMANDS_MAP) {
+                if (command.startsWith(cmdKey)) {
+                    let cmdFunc =
+                        QUICKS_COMMANDS_MAP[
+                            cmdKey as keyof typeof QUICKS_COMMANDS_MAP
+                        ];
+
+                    let params: string[] =
+                        command.split("::")[1]?.split(",") || [];
+
+                    // @ts-ignore
+                    commandsToBeExecuted = cmdFunc(...params);
+                    break;
+                }
+            }
+            if (commandsToBeExecuted.length === 0) {
+                commandsToBeExecuted = [command];
+            }
         }
         console.log("Commands to be executed:", commandsToBeExecuted);
 
@@ -541,11 +630,13 @@ router.post("/execute-command", authenticateToken, async (req, res) => {
         let haveAtleastOneError = false;
         let errorServersList: string[] = [];
         for (let serverObject of serverDocs) {
+            const cmds =
+                perServerCommands[serverObject.server] ?? commandsToBeExecuted;
             SSHService.executeCommands(
                 serverObject.server,
                 serverObject.username,
                 serverObject.password,
-                commandsToBeExecuted,
+                cmds,
                 30_000,
                 {
                     sshPrivateKey: serverObject.sshPrivateKey,

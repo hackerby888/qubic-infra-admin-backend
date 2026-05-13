@@ -429,6 +429,47 @@ router.post(
     }
 );
 
+router.post("/ttyd-credentials", authenticateToken, async (req, res) => {
+    try {
+        let { host } = req.body;
+        let operator = req.user?.username;
+        if (!operator) {
+            res.status(400).json({ error: "No operator found" });
+            return;
+        }
+        if (!host) {
+            res.status(400).json({ error: "Missing host" });
+            return;
+        }
+
+        let serverDoc = await Mongodb.getServersCollection().findOne({
+            server: host,
+            operator: mongodbOperatorSelection(operator),
+        });
+        if (!serverDoc) {
+            res.status(404).json({ error: "Server not found" });
+            return;
+        }
+        if (!serverDoc.ttyd) {
+            res.status(404).json({
+                error: "ttyd is not installed on this server. Run 'Install ttyd' from the Shell panel first.",
+            });
+            return;
+        }
+
+        res.json({
+            host: serverDoc.server,
+            port: serverDoc.ttyd.port,
+            token: serverDoc.ttyd.token,
+        });
+    } catch (error) {
+        logger.error(
+            `Error fetching ttyd credentials: ${(error as Error).message}`
+        );
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
 router.post("/update-server-note", authenticateToken, async (req, res) => {
     try {
         let operator = req.user?.username;

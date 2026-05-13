@@ -5,7 +5,6 @@ import { SSHService } from "../services/ssh-service.js";
 import { NodeService } from "../services/node-service.js";
 import { sleep } from "../utils/time.js";
 import WebSocket from "ws";
-import jwt from "jsonwebtoken";
 
 declare module "socket.io" {
     interface Socket {
@@ -15,7 +14,6 @@ declare module "socket.io" {
         isSubscribedToLogs: boolean;
         isSubscribedToRealtimeStats: boolean;
         isSubscribedToBobLogs: boolean;
-        isSubscribedToConsole: boolean;
     }
 }
 
@@ -23,13 +21,6 @@ export namespace SocketServer {
     let io: Server;
     let connectingRealtimeSockets: Set<Socket> = new Set();
     let connectingBobRealtimeLogSockets: { [key: string]: WebSocket } = {};
-
-    type SshConsoleHandle = {
-        write: (data: string) => void;
-        resize: (cols: number, rows: number) => void;
-        close: () => void;
-    };
-    let sshConsoleHandles: { [socketId: string]: SshConsoleHandle } = {};
 
     async function watchAndbroadcastRealtimeStats() {
         while (true) {
@@ -298,109 +289,6 @@ export namespace SocketServer {
                 }
             );
 
-            ///////////////// SSH Console /////////////////
-
-            socket.on(
-                "subscribeToSshConsole",
-                async (data: {
-                    host: string;
-                    token: string;
-                    cols: number;
-                    rows: number;
-                }) => {
-                    try {
-                        jwt.verify(
-                            data.token,
-                            process.env.JWT_SECRET as string
-                        );
-                    } catch {
-                        socket.emit("sshConsoleError", "Unauthorized");
-                        return;
-                    }
-
-                    let serverDoc =
-                        await Mongodb.getServersCollection().findOne({
-                            server: data.host,
-                        });
-                    if (!serverDoc) {
-                        socket.emit(
-                            "sshConsoleError",
-                            `Server not found: ${data.host}`
-                        );
-                        return;
-                    }
-
-                    try {
-                        let handle = await SSHService.openSshConsole(
-                            serverDoc.server,
-                            serverDoc.username,
-                            serverDoc.password,
-                            {
-                                sshPrivateKey: serverDoc.sshPrivateKey,
-                                cols: data.cols || 80,
-                                rows: data.rows || 24,
-                                onData: (chunk) => {
-                                    socket.emit(
-                                        "sshConsoleOutput",
-                                        chunk.toString("binary")
-                                    );
-                                },
-                                onClose: () => {
-                                    socket.emit("sshConsoleClose");
-                                    delete sshConsoleHandles[socket.id];
-                                    socket.isSubscribedToConsole = false;
-                                },
-                                onError: (err) => {
-                                    socket.emit(
-                                        "sshConsoleError",
-                                        err.message
-                                    );
-                                },
-                            }
-                        );
-                        sshConsoleHandles[socket.id] = handle;
-                        socket.isSubscribedToConsole = true;
-                        logger.info(
-                            `SSH console opened for socket ${socket.id} -> ${data.host}`
-                        );
-                    } catch (err) {
-                        socket.emit(
-                            "sshConsoleError",
-                            (err as Error).message
-                        );
-                    }
-                }
-            );
-
-            socket.on("sshConsoleInput", (data: string) => {
-                let handle = sshConsoleHandles[socket.id];
-                if (handle) {
-                    handle.write(data);
-                }
-            });
-
-            socket.on(
-                "sshConsoleResize",
-                (data: { cols: number; rows: number }) => {
-                    let handle = sshConsoleHandles[socket.id];
-                    if (handle) {
-                        handle.resize(data.cols, data.rows);
-                    }
-                }
-            );
-
-            socket.on("unsubscribeFromSshConsole", () => {
-                let handle = sshConsoleHandles[socket.id];
-                if (handle) {
-                    handle.close();
-                    delete sshConsoleHandles[socket.id];
-                    socket.isSubscribedToConsole = false;
-                    logger.info(
-                        `SSH console closed for socket ${socket.id}`
-                    );
-                }
-            });
-
             socket.on("disconnect", () => {
                 // clean up logs stuff
                 if (
@@ -431,14 +319,6 @@ export namespace SocketServer {
                     let ws = connectingBobRealtimeLogSockets[socket.id];
                     if (ws) {
                         ws.close();
-                    }
-                }
-
-                if (socket.isSubscribedToConsole) {
-                    let handle = sshConsoleHandles[socket.id];
-                    if (handle) {
-                        handle.close();
-                        delete sshConsoleHandles[socket.id];
                     }
                 }
             });

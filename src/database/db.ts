@@ -123,6 +123,10 @@ export namespace MongoDbTypes {
             };
         };
         sshPrivateKey: string;
+        ttyd?: {
+            token: string;
+            port: number;
+        };
     }
 
     export interface User {

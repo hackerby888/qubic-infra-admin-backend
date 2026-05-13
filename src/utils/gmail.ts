@@ -2,7 +2,10 @@ import nodemailer from "nodemailer";
 import { logger } from "./logger.js";
 
 const transporter = nodemailer.createTransport({
-    service: "gmail",
+    host: "smtp.gmail.com",
+    port: 587,
+    secure: false, // STARTTLS — required because 465 is firewalled on prod
+    requireTLS: true,
     auth: {
         user: process.env.GMAIL_USER,
         pass: process.env.GMAIL_APP_PASSWORD,

@@ -58,6 +58,8 @@ namespace NodeService {
     let _currentLiteNodes: LiteNodeExtended[] = [];
     let _currentBobNodes: BobNodeExtended[] = [];
     let _serverToOperatorMap: { [server: string]: string } = {};
+    // IPs excluded from random-peers results (loaded from blacklisted_peers collection)
+    let _blacklistedPeers: Set<string> = new Set();
 
     let _status: {
         liteServers: {
@@ -613,6 +615,24 @@ namespace NodeService {
         } catch (error) {}
     }
 
+    export async function refreshBlacklistedPeers() {
+        try {
+            let docs = await Mongodb.getBlacklistedPeersCollection()
+                .find({}, { projection: { ip: 1 } })
+                .toArray();
+            _blacklistedPeers = new Set(docs.map((d) => d.ip));
+            logger.info(`Loaded ${_blacklistedPeers.size} blacklisted peers`);
+        } catch (error) {
+            logger.error(
+                `Error loading blacklisted peers: ${(error as Error).message}`
+            );
+        }
+    }
+
+    export function isPeerBlacklisted(ip: string) {
+        return _blacklistedPeers.has(ip);
+    }
+
     export function getRandomLiteNode(
         n: number,
         {
@@ -645,6 +665,9 @@ namespace NodeService {
                 }
             );
         }
+
+        // always exclude blacklisted peers from random-peers results
+        servers = servers.filter((server) => !_blacklistedPeers.has(server));
 
         // filter out servers in filterOut list
         servers = servers.filter((server) => !filterOut.includes(server));
@@ -751,6 +774,9 @@ namespace NodeService {
                 }
             );
         }
+        // always exclude blacklisted peers from random-peers results
+        servers = servers.filter((server) => !_blacklistedPeers.has(server));
+
         if (n >= servers.length) {
             return servers;
         }
@@ -980,6 +1006,7 @@ namespace NodeService {
 
     export async function start() {
         await pullServerLists();
+        await refreshBlacklistedPeers();
         watchLiteNodes();
         watchBobNodes();
         watchAndSaveSnapshot();

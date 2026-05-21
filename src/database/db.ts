@@ -143,6 +143,13 @@ export namespace MongoDbTypes {
         logs: string;
         timestamp: number;
     }
+
+    export interface BlacklistedPeer {
+        ip: string;
+        note?: string;
+        operator: string; // admin username who added it (audit)
+        createdAt: number;
+    }
 }
 
 export namespace Mongodb {
@@ -176,6 +183,10 @@ export namespace Mongodb {
             { server: 1 },
             { unique: true }
         );
+        await getBlacklistedPeersCollection().createIndex(
+            { ip: 1 },
+            { unique: true }
+        );
         return db;
     }
 
@@ -195,6 +206,12 @@ export namespace Mongodb {
 
     export function getCrashReportsCollection() {
         return getDB().collection<MongoDbTypes.CrashReport>("crash_reports");
+    }
+
+    export function getBlacklistedPeersCollection() {
+        return getDB().collection<MongoDbTypes.BlacklistedPeer>(
+            "blacklisted_peers"
+        );
     }
 
     export function getCheckinsCollection() {

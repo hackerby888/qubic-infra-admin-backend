@@ -11,6 +11,7 @@ import monitoringRoutes from "./monitoring.routes.js";
 import automationRoutes from "./automation.routes.js";
 import mapRoutes from "./map.routes.js";
 import crashReportRoutes from "./crashreport.routes.js";
+import blacklistRoutes from "./blacklist.routes.js";
 
 export function setupRoutes(app: express.Application) {
     // Health check
@@ -48,4 +49,7 @@ export function setupRoutes(app: express.Application) {
 
     // Crash reports (uncomment if you want to enable crash report handling)
     app.use("/", crashReportRoutes);
+
+    // Blacklisted peers (admin-only management; filters /random-peers)
+    app.use("/", blacklistRoutes);
 }

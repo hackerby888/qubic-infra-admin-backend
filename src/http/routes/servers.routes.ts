@@ -300,6 +300,166 @@ router.post("/new-servers", authenticateToken, async (req, res) => {
     res.json({ message: "Servers added successfully" });
 });
 
+router.post(
+    "/promote-tracking-server",
+    authenticateToken,
+    async (req, res) => {
+        let body: {
+            server: string;
+            authType: "password" | "sshKey";
+            username: string;
+            password?: string;
+        } = req.body;
+        let { server, authType, username, password } = body;
+        let operator = req.user?.username;
+
+        if (!operator) {
+            res.status(400).json({ error: "No operator found" });
+            return;
+        }
+        if (!server || !username || (authType !== "password" && authType !== "sshKey")) {
+            res.status(400).json({ error: "Missing or invalid parameters" });
+            return;
+        }
+        if (authType === "password" && !password) {
+            res.status(400).json({ error: "Password required for password auth" });
+            return;
+        }
+
+        // Resolve the server and ensure it belongs to the operator and is tracking-only
+        let serverDoc = await Mongodb.getServersCollection().findOne({
+            server: server,
+            operator: mongodbOperatorSelection(operator),
+        });
+        if (!serverDoc) {
+            res.status(404).json({ error: "Server not found" });
+            return;
+        }
+        if (serverDoc.username) {
+            res.status(400).json({
+                error: "Server already has credentials (not tracking-only)",
+            });
+            return;
+        }
+
+        // Resolve SSH key when using key auth (stored on the user)
+        let userSshKey = "";
+        if (authType === "sshKey") {
+            let userDoc = await Mongodb.getUsersCollection().findOne({
+                username: operator,
+            });
+            if (userDoc && userDoc.currentsshPrivateKey) {
+                userSshKey = userDoc.currentsshPrivateKey;
+            } else {
+                res.status(400).json({ error: "No SSH key found for user" });
+                return;
+            }
+        }
+
+        let resolvedPassword = authType === "password" ? password || "" : "";
+
+        try {
+            await Mongodb.getServersCollection().updateOne(
+                { server: server },
+                {
+                    $set: {
+                        username: username,
+                        password: resolvedPassword,
+                        sshPrivateKey: userSshKey,
+                        status: "setting_up",
+                    },
+                }
+            );
+        } catch (error) {
+            logger.error(
+                `Error promoting tracking server: ${(error as Error).message}`
+            );
+            res.status(500).json({ error: "Failed to update server" });
+            return;
+        }
+
+        // Kick off setup asynchronously (3+ min); respond immediately
+        SSHService.setupNode(server, username, resolvedPassword, userSshKey)
+            .then((result) => {
+                if (result.isSuccess) {
+                    Mongodb.getServersCollection()
+                        .updateOne(
+                            { server: server },
+                            {
+                                $set: {
+                                    cpu: result.cpu,
+                                    os: result.os,
+                                    ram: result.ram,
+                                    status: "active",
+                                    setupLogs: {
+                                        stdout:
+                                            `---------- Time elapsed ${millisToSeconds(
+                                                result.duration
+                                            )} seconds ----------- \n\n` +
+                                            Object.values(result.stdouts).join(
+                                                "\n"
+                                            ),
+                                        stderr: Object.values(
+                                            result.stderrs
+                                        ).join("\n"),
+                                    },
+                                },
+                            }
+                        )
+                        .then(() => NodeService.pullServerLists())
+                        .catch((_) => {});
+                } else {
+                    Mongodb.getServersCollection()
+                        .updateOne(
+                            { server: server },
+                            {
+                                $set: {
+                                    status: "error",
+                                    setupLogs: {
+                                        stdout:
+                                            `---------- Time elapsed ${millisToSeconds(
+                                                result.duration
+                                            )} seconds ----------- \n\n` +
+                                            Object.values(result.stdouts).join(
+                                                "\n"
+                                            ),
+                                        stderr:
+                                            `---------- Time elapsed ${millisToSeconds(
+                                                result.duration
+                                            )} seconds ----------- \n\n` +
+                                            Object.values(
+                                                result.stderrs
+                                            ).join("\n"),
+                                    },
+                                },
+                            }
+                        )
+                        .then()
+                        .catch((_) => {});
+                }
+            })
+            .catch((error) => {
+                Mongodb.getServersCollection()
+                    .updateOne(
+                        { server: server },
+                        {
+                            $set: {
+                                status: "error",
+                                setupLogs: {
+                                    stdout: (error as Error).message,
+                                    stderr: (error as Error).message,
+                                },
+                            },
+                        }
+                    )
+                    .then()
+                    .catch(() => {});
+            });
+
+        res.json({ message: "Server promotion started" });
+    }
+);
+
 router.get("/my-servers", authenticateToken, async (req, res) => {
     try {
         let operator = req.user?.username;

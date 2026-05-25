@@ -96,6 +96,33 @@ export namespace Gmail {
         });
     }
 
+    export async function sendMainNodeFailoverEmail({
+        type,
+        server,
+        groupId,
+        reason,
+        tick,
+    }: {
+        type: "promote" | "demote";
+        server: string;
+        groupId: string;
+        reason: string;
+        tick: number;
+    }): Promise<boolean> {
+        const recipients = getAlertRecipients();
+        if (recipients.length === 0) return false;
+        const action =
+            type === "promote" ? "promoted to Main" : "demoted from Main";
+        const shortGroup = groupId.slice(0, 8);
+        return sendEmail({
+            from: `"Qubic Global Automated Sender" <${process.env.GMAIL_USER}>`,
+            to: recipients,
+            subject: `Lite node ${server} ${action} (group ${shortGroup})`,
+            text: `Lite node ${server} was ${action} in group ${shortGroup}. Reason: ${reason}. Tick: ${tick}.`,
+            html: `<b>Lite node ${server}</b> was <b>${action}</b> in group <code>${shortGroup}</code>.<br/>Reason: <i>${reason}</i><br/>Tick: <code>${tick}</code>`,
+        });
+    }
+
     export async function sendServerStartedEmail({
         port,
     }: {

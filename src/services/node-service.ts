@@ -1004,6 +1004,285 @@ namespace NodeService {
         }
     }
 
+    export interface MainNodeEvent {
+        type: "promote" | "demote";
+        server: string;
+        groupId: string;
+        operator: string;
+        reason: string;
+        tick: number;
+        timestamp: number;
+    }
+    let _mainNodeEventCb: ((event: MainNodeEvent) => void) | null = null;
+    // SocketServer registers here to relay promote/demote events to clients.
+    export function onMainNodeEvent(cb: (event: MainNodeEvent) => void) {
+        _mainNodeEventCb = cb;
+    }
+
+    const PROMOTE_WATCH_INTERVAL_MS = 15_000;
+    const MAIN_UNHEALTHY_MS = 30_000; // unreachable or tick-frozen this long => down
+    const GROUP_ACTION_COOLDOWN_MS = 120_000; // settle time after an action confirms before next decision
+    const F12_RETRY_INTERVAL_MS = 20_000; // gap between F12 re-tries (F12 not guaranteed first try)
+    const F12_MAX_ATTEMPTS = 5;
+    const lastGroupActionAt: Record<string, number> = {};
+    const promotedMainByGroup: Record<string, string> = {};
+    // In-flight F12 actions awaiting confirmation (keyed by server). F12 is not
+    // guaranteed to change mode on the first try, so we verify via tick-info and
+    // re-send until the node reaches the desired mode (or attempts run out).
+    interface PendingAction {
+        desired: "main" | "aux";
+        groupId: string;
+        operator: string;
+        reason: string;
+        attempts: number;
+        lastTryAt: number;
+    }
+    const pendingActions: Record<string, PendingAction> = {};
+
+    // Keeps exactly one Main lite node per groupId. Promotes the most in-sync aux
+    // (F12 = change mode) when a group has no healthy Main (Main down/crashed, or
+    // group fully up but nobody flipped), and demotes extras down to one.
+    async function watchAndPromoteMain() {
+        while (true) {
+            try {
+                // operator opt-in (cron_jobs command "auto-promote-main")
+                const operatorEnabled: Record<string, boolean> = {};
+                const cronJobs = await Mongodb.getCronJobsCollection()
+                    .find({ command: "auto-promote-main" })
+                    .toArray();
+                for (const job of cronJobs) {
+                    operatorEnabled[job.operator] = job.isEnabled;
+                }
+
+                // SSH creds per managed node (tracking-only nodes have no username)
+                const credsByServer: Record<
+                    string,
+                    {
+                        username: string;
+                        password: string;
+                        sshPrivateKey: string;
+                        operator: string;
+                    }
+                > = {};
+                const serverDocs = (await Mongodb.getServersCollection()
+                    .find({})
+                    .toArray()) as MongoDbTypes.Server[];
+                for (const doc of serverDocs) {
+                    if (doc.username) {
+                        credsByServer[doc.server] = {
+                            username: doc.username,
+                            password: doc.password,
+                            sshPrivateKey: doc.sshPrivateKey,
+                            operator: doc.operator,
+                        };
+                    }
+                }
+
+                const systemTick = NodeService.getNetworkStatus().tick;
+                const now = Date.now();
+
+                // group lite servers by groupId (skip ungrouped / default-id nodes)
+                const groups: Record<string, string[]> = {};
+                for (const [server, info] of Object.entries(
+                    _status.liteServers
+                )) {
+                    if (!info.groupId) continue;
+                    (groups[info.groupId] ||= []).push(server);
+                }
+
+                const isHealthy = (server: string) => {
+                    const info = _status.liteServers[server];
+                    if (!info) return false;
+                    return (
+                        info.epoch !== -1 &&
+                        now - info.lastUpdated < MAIN_UNHEALTHY_MS &&
+                        now - info.lastTickChanged < MAIN_UNHEALTHY_MS
+                    );
+                };
+                const isMain = (server: string) =>
+                    (_status.liteServers[server]!.mainAuxStatus & 1) === 1;
+                const tickOf = (server: string) =>
+                    _status.liteServers[server]?.tick || 0;
+
+                const sendF12 = (server: string) => {
+                    const creds = credsByServer[server];
+                    if (!creds) return;
+                    SSHService.executeCommands(
+                        server,
+                        creds.username,
+                        creds.password,
+                        [
+                            `screen -S ${SSHService.LITE_SCREEN_NAME} -X stuff $'\\x1b[24~'`,
+                        ],
+                        60_000,
+                        { sshPrivateKey: creds.sshPrivateKey }
+                    )
+                        .then(() =>
+                            logger.info(`Sent F12 (change mode) to ${server}`)
+                        )
+                        .catch(() => {});
+                };
+
+                const startAction = (
+                    server: string,
+                    desired: "main" | "aux",
+                    groupId: string,
+                    reason: string
+                ) => {
+                    pendingActions[server] = {
+                        desired,
+                        groupId,
+                        operator: credsByServer[server]?.operator || "",
+                        reason,
+                        attempts: 1,
+                        lastTryAt: now,
+                    };
+                    sendF12(server);
+                    logger.info(
+                        `Group ${groupId}: F12 #1 to ${
+                            desired === "main" ? "promote" : "demote"
+                        } ${server}`
+                    );
+                };
+
+                // Reconcile in-flight F12 actions: confirm via tick-info, retry, or give up.
+                for (const [server, p] of Object.entries(pendingActions)) {
+                    const info = _status.liteServers[server];
+                    const isMainNow = info
+                        ? (info.mainAuxStatus & 1) === 1
+                        : false;
+                    const reached =
+                        !!info &&
+                        info.epoch !== -1 &&
+                        (p.desired === "main" ? isMainNow : !isMainNow);
+                    if (reached) {
+                        if (p.desired === "main")
+                            promotedMainByGroup[p.groupId] = server;
+                        lastGroupActionAt[p.groupId] = now;
+                        delete pendingActions[server];
+                        logger.info(
+                            `Group ${p.groupId}: ${server} confirmed ${p.desired} after ${p.attempts} F12 attempt(s)`
+                        );
+                        _mainNodeEventCb?.({
+                            type: p.desired === "main" ? "promote" : "demote",
+                            server,
+                            groupId: p.groupId,
+                            operator: p.operator,
+                            reason: p.reason,
+                            tick: tickOf(server),
+                            timestamp: now,
+                        });
+                        Gmail.sendMainNodeFailoverEmail({
+                            type: p.desired === "main" ? "promote" : "demote",
+                            server,
+                            groupId: p.groupId,
+                            reason: p.reason,
+                            tick: tickOf(server),
+                        });
+                    } else if (now - p.lastTryAt >= F12_RETRY_INTERVAL_MS) {
+                        if (p.attempts >= F12_MAX_ATTEMPTS) {
+                            lastGroupActionAt[p.groupId] = now;
+                            delete pendingActions[server];
+                            logger.error(
+                                `Group ${p.groupId}: F12 failed to set ${server} to ${p.desired} after ${p.attempts} attempts`
+                            );
+                        } else {
+                            p.attempts++;
+                            p.lastTryAt = now;
+                            sendF12(server);
+                            logger.info(
+                                `Group ${p.groupId}: F12 #${p.attempts} retry to set ${server} to ${p.desired}`
+                            );
+                        }
+                    }
+                }
+
+                for (const [groupId, members] of Object.entries(groups)) {
+                    // don't make new decisions while an action for this group is unconfirmed
+                    if (members.some((s) => pendingActions[s])) continue;
+                    if (
+                        now - (lastGroupActionAt[groupId] || 0) <
+                        GROUP_ACTION_COOLDOWN_MS
+                    ) {
+                        continue;
+                    }
+
+                    const healthyMains = members.filter(
+                        (s) => isMain(s) && isHealthy(s)
+                    );
+                    const downMains = members.filter(
+                        (s) => isMain(s) && !isHealthy(s)
+                    );
+                    const candidateAux = members.filter(
+                        (s) =>
+                            !isMain(s) &&
+                            isHealthy(s) &&
+                            credsByServer[s] &&
+                            operatorEnabled[credsByServer[s]!.operator]
+                    );
+
+                    if (healthyMains.length === 0 && candidateAux.length >= 1) {
+                        // (a) failover: a Main existed and died; or
+                        // (b) cold election: group fully up but no Main (forgot to flip)
+                        const allHealthy = members.every((s) => isHealthy(s));
+                        const shouldPromote =
+                            downMains.length >= 1 ||
+                            (downMains.length === 0 && allHealthy);
+                        if (shouldPromote) {
+                            const pick = [...candidateAux].sort((a, b) => {
+                                const d = tickOf(b) - tickOf(a);
+                                return d !== 0 ? d : a.localeCompare(b);
+                            })[0]!;
+                            const reason =
+                                downMains.length >= 1
+                                    ? "failover: previous Main down"
+                                    : "elected: group had no Main";
+                            logger.info(
+                                `Group ${groupId}: no healthy Main (systemTick ${systemTick}); promoting ${pick} (tick ${tickOf(
+                                    pick
+                                )})`
+                            );
+                            startAction(pick, "main", groupId, reason);
+                        }
+                    } else if (healthyMains.length > 1) {
+                        // enforce single Main: keep the promoted one (or highest tick),
+                        // demote one other (prefer the recovered old Main)
+                        const keep =
+                            promotedMainByGroup[groupId] &&
+                            healthyMains.includes(promotedMainByGroup[groupId]!)
+                                ? promotedMainByGroup[groupId]!
+                                : [...healthyMains].sort(
+                                      (a, b) => tickOf(b) - tickOf(a)
+                                  )[0]!;
+                        const demotable = healthyMains.filter(
+                            (s) =>
+                                s !== keep &&
+                                credsByServer[s] &&
+                                operatorEnabled[credsByServer[s]!.operator]
+                        );
+                        if (demotable.length >= 1) {
+                            const victim = demotable[0]!;
+                            logger.info(
+                                `Group ${groupId}: ${healthyMains.length} Mains; demoting ${victim}, keeping ${keep}`
+                            );
+                            startAction(
+                                victim,
+                                "aux",
+                                groupId,
+                                "enforce single Main per group"
+                            );
+                        }
+                    }
+                }
+            } catch (error) {
+                logger.error(
+                    `Error in watchAndPromoteMain: ${(error as Error).message}`
+                );
+            }
+            await sleep(PROMOTE_WATCH_INTERVAL_MS);
+        }
+    }
+
     export async function start() {
         await pullServerLists();
         await refreshBlacklistedPeers();
@@ -1011,6 +1290,7 @@ namespace NodeService {
         watchBobNodes();
         watchAndSaveSnapshot();
         watchMainNode();
+        watchAndPromoteMain();
     }
 }
 

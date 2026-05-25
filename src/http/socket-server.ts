@@ -21,6 +21,8 @@ export namespace SocketServer {
     let io: Server;
     let connectingRealtimeSockets: Set<Socket> = new Set();
     let connectingBobRealtimeLogSockets: { [key: string]: WebSocket } = {};
+    // Lightweight channel for event notifications (promote/demote) — no stats stream.
+    let notificationSockets: Set<Socket> = new Set();
 
     async function watchAndbroadcastRealtimeStats() {
         while (true) {
@@ -236,6 +238,15 @@ export namespace SocketServer {
                 }
             });
 
+            ///////////////// Register for event notifications /////////////////
+            socket.on(
+                "registerNotifications",
+                (data: { operator?: string }) => {
+                    if (data?.operator) socket.operator = data.operator;
+                    notificationSockets.add(socket);
+                }
+            );
+
             ///////////////// Subcribe to Bob Realtime Logs Proxy /////////////////
             socket.on(
                 "subscribeToBobRealtimeLogs",
@@ -314,6 +325,8 @@ export namespace SocketServer {
                     );
                 }
 
+                notificationSockets.delete(socket);
+
                 if (socket.isSubscribedToBobLogs) {
                     // close corresponding WebSocket connections
                     let ws = connectingBobRealtimeLogSockets[socket.id];
@@ -322,6 +335,17 @@ export namespace SocketServer {
                     }
                 }
             });
+        });
+
+        NodeService.onMainNodeEvent((event) => {
+            for (const socket of notificationSockets) {
+                if (
+                    socket.operator === "admin" ||
+                    socket.operator === event.operator
+                ) {
+                    socket.emit("mainNodeEvent", event);
+                }
+            }
         });
 
         watchAndbroadcastRealtimeStats();

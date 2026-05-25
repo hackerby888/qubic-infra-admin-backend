@@ -1049,7 +1049,7 @@ namespace NodeService {
         _mainNodeEventCb = cb;
     }
 
-    const PROMOTE_WATCH_INTERVAL_MS = 15_000;
+    const PROMOTE_WATCH_INTERVAL_MS = 3_000;
     const MAIN_UNHEALTHY_MS = 30_000; // unreachable or tick-frozen this long => down
     const GROUP_ACTION_COOLDOWN_MS = 120_000; // settle time after an action confirms before next decision
     const F12_RETRY_INTERVAL_MS = 20_000; // gap between F12 re-tries (F12 not guaranteed first try)

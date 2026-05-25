@@ -256,9 +256,71 @@ namespace NodeService {
         return [];
     }
 
-    async function watchLiteNodes() {
-        const isGotRunningIds: { [server: string]: boolean } = {};
+    // Single-shot running-ids fetch (no retry) for the periodic groupId refresh.
+    async function fetchRunningIdsOnce(
+        server: string,
+        timeoutMs = 3000
+    ): Promise<string[] | null> {
+        const url = `http://${server}:${DEFAULT_LITE_NODE_HTTP_PORT}/running-ids`;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const res = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeout);
+            if (!res.ok) return null;
+            const data: { runningIds: string[] } = await res.json();
+            return Array.isArray(data.runningIds) ? data.runningIds : null;
+        } catch {
+            clearTimeout(timeout);
+            return null;
+        }
+    }
 
+    // Refresh ids+groupId for our system lite nodes every 10s, so cluster grouping
+    // (used by Main failover) stays current when a node's running id set changes.
+    async function watchAndRefreshGroupIds() {
+        const REFRESH_INTERVAL_MS = 10_000;
+        while (true) {
+            try {
+                const nodes = [..._currentLiteNodes]; // system nodes only
+                await Promise.all(
+                    nodes.map(async (node) => {
+                        const server = node.server;
+                        const status = _status.liteServers[server];
+                        // only reachable system nodes
+                        if (!status || status.tick === -1 || status.epoch === -1)
+                            return;
+                        const ids = await fetchRunningIdsOnce(server);
+                        if (!ids) return; // unreachable/failed → keep existing
+                        const groupId = calcGroupIdFromIds(ids);
+                        if ((node.groupId || "") === groupId) return; // unchanged
+                        node.ids = ids;
+                        node.groupId = groupId;
+                        if (_status.liteServers[server]) {
+                            _status.liteServers[server].groupId = groupId;
+                        }
+                        await Mongodb.getLiteNodeCollection()
+                            .updateOne({ server }, { $set: { ids, groupId } })
+                            .catch(() => {});
+                        logger.info(
+                            `Refreshed groupId for ${server}: ${
+                                groupId ? groupId.slice(0, 8) : "(none)"
+                            }`
+                        );
+                    })
+                );
+            } catch (error) {
+                logger.error(
+                    `Error in watchAndRefreshGroupIds: ${
+                        (error as Error).message
+                    }`
+                );
+            }
+            await sleep(REFRESH_INTERVAL_MS);
+        }
+    }
+
+    async function watchLiteNodes() {
         const handleFetchAndUpdate = async (
             statusObject: {
                 [server: string]: LiteNodeTickInfo;
@@ -301,38 +363,6 @@ namespace NodeService {
                                 ? Date.now()
                                 : serverObject?.lastTickChanged || -1,
                     };
-
-                    if (serversLiteNodeDb && serversLiteNodeDb[index]) {
-                        if (
-                            tickInfo.tick !== -1 &&
-                            !isGotRunningIds[serverIp] &&
-                            (!serversLiteNodeDb[index]!.groupId ||
-                                serversLiteNodeDb[index]!.groupId === "")
-                        ) {
-                            // Try to get running IDs from the lite node
-                            isGotRunningIds[serverIp] = true;
-                            NodeService.tryGetIdsFromLiteNode(serverIp).then(
-                                (ids) => {
-                                    let groupId = calcGroupIdFromIds(ids);
-                                    serversLiteNodeDb[index]!.groupId = groupId;
-                                    Mongodb.getLiteNodeCollection()
-                                        .updateOne(
-                                            {
-                                                server: serverIp,
-                                            },
-                                            {
-                                                $set: {
-                                                    ids: ids,
-                                                    groupId: groupId,
-                                                },
-                                            }
-                                        )
-                                        .then()
-                                        .catch(() => {});
-                                }
-                            );
-                        }
-                    }
                 }
             });
         };
@@ -1288,6 +1318,7 @@ namespace NodeService {
         await refreshBlacklistedPeers();
         watchLiteNodes();
         watchBobNodes();
+        watchAndRefreshGroupIds();
         watchAndSaveSnapshot();
         watchMainNode();
         watchAndPromoteMain();

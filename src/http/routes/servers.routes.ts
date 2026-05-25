@@ -656,4 +656,32 @@ router.post("/update-server-note", authenticateToken, async (req, res) => {
     }
 });
 
+router.post("/set-server-bulk-skip", authenticateToken, async (req, res) => {
+    try {
+        let operator = req.user?.username;
+        let { server, skip } = req.body as { server: string; skip: boolean };
+        if (!operator) {
+            res.status(400).json({ error: "No operator found" });
+            return;
+        }
+        if (!server) {
+            res.status(400).json({ error: "No server specified" });
+            return;
+        }
+
+        await Mongodb.getServersCollection().updateOne(
+            { server: server, operator: mongodbOperatorSelection(operator) },
+            { $set: { skipBulkSelect: Boolean(skip) } }
+        );
+        res.json({ message: "Bulk-select preference updated successfully" });
+    } catch (error) {
+        logger.error(
+            `Error setting server bulk-skip: ${(error as Error).message}`
+        );
+        res.status(500).json({
+            error: "Failed to set bulk-select preference " + error,
+        });
+    }
+});
+
 export default router;

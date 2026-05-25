@@ -96,6 +96,7 @@ export namespace MongoDbTypes {
         ipInfo?: IpInfo;
         alias?: string;
         note?: string;
+        skipBulkSelect?: boolean; // exclude from "Select Lite/Bob Nodes" bulk select (e.g. runs a separate binary)
         operator: string;
         username: string;
         password: string;

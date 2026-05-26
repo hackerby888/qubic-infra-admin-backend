@@ -56,8 +56,14 @@ router.get("/crash-reports", authenticateToken, async (req, res) => {
 router.post("/crash-reports", async (req, res) => {
     try {
         const crashReport: object = req.body;
-        let ip = req.ip || req.socket.remoteAddress;
-        ip = ip?.replace("::ffff:", "") || "unknown"; // Handle IPv4-mapped IPv6 addresses
+        const xff = req.headers["x-forwarded-for"];
+        const xffFirst = Array.isArray(xff)
+            ? xff[0]
+            : typeof xff === "string"
+                ? xff.split(",")[0]?.trim()
+                : undefined;
+        let ip = xffFirst || req.socket.remoteAddress || req.ip || "unknown";
+        ip = ip.replace("::ffff:", ""); // Handle IPv4-mapped IPv6 addresses
         let type: string = "unknown";
         if (crashReport.hasOwnProperty("type")) {
             const reportType = (crashReport as any).type;

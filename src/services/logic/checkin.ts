@@ -1,7 +1,10 @@
-import { Mongodb, type MongoDbTypes } from "../../database/db.js";
+import { Mongodb, type MongoDbTypes, IS_NO_DB } from "../../database/db.js";
 import { getLastWednesdayTimestamp } from "../../utils/time.js";
 import { NodeService } from "../node-service.js";
 import NodeCache from "node-cache";
+
+const DEFAULT_OPERATOR =
+    "BZBQFLLBNCXEMGLOBHUVFTLUPLVCPQUASSILFABOFFBCADQSSUPNWLZBQEXK";
 
 namespace Checkin {
     let cache = new NodeCache({ stdTTL: 15 * 60, checkperiod: 20 * 60 });
@@ -42,10 +45,15 @@ namespace Checkin {
         // no cache, fetch from db
         let query: any = {};
 
-        if (excludeDefaultOp) {
-            query.operator = {
-                $ne: "BZBQFLLBNCXEMGLOBHUVFTLUPLVCPQUASSILFABOFFBCADQSSUPNWLZBQEXK",
-            };
+        if (excludeDefaultOp && operator) {
+            // both: must equal operator AND not equal default.
+            // If operator IS the default, no row can satisfy both → force empty.
+            if (operator === DEFAULT_OPERATOR) {
+                return [];
+            }
+            query.operator = operator;
+        } else if (excludeDefaultOp) {
+            query.operator = { $ne: DEFAULT_OPERATOR };
         } else if (operator) {
             query.operator = operator;
         }
@@ -86,11 +94,35 @@ namespace Checkin {
             $lt: nextWedTimestamp,
         };
 
-        let checkins = (await Mongodb.getCheckinsCollection()
-            .find(query, { projection: { _id: 0 } })
-            .limit(normalized ? Infinity : 1000)
-            .skip(0)
-            .toArray()) as MongoDbTypes.Checkin[];
+        let checkins: MongoDbTypes.Checkin[];
+        if (IS_NO_DB) {
+            const ipRegex = ipv4 ? new RegExp(ipv4) : null;
+            const all = NodeService.getNoDbCheckins();
+            const filtered = all.filter((c) => {
+                if (excludeDefaultOp && c.operator === DEFAULT_OPERATOR)
+                    return false;
+                if (operator && c.operator !== operator) return false;
+                if (type && c.type !== type) return false;
+                if (ipRegex && !ipRegex.test(c.ip || "")) return false;
+                if (
+                    !(
+                        c.lastCheckinAt >= lastWedTimestamp &&
+                        c.lastCheckinAt < nextWedTimestamp
+                    )
+                )
+                    return false;
+                return true;
+            });
+            checkins = (normalized ? filtered : filtered.slice(0, 1000)).map(
+                (c) => ({ ...c })
+            );
+        } else {
+            checkins = (await Mongodb.getCheckinsCollection()
+                .find(query, { projection: { _id: 0 } })
+                .limit(normalized ? Infinity : 1000)
+                .skip(0)
+                .toArray()) as MongoDbTypes.Checkin[];
+        }
 
         if (normalized) {
             // merge checkins by type+operator+ip, calc total uptime and last checkin

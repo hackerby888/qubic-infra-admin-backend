@@ -24,6 +24,8 @@ router.get("/random-peers", async (req, res) => {
 
         let expectedLitePeersLength = parseInt(req.query.litePeers as string);
         let expectedBobPeersLength = parseInt(req.query.bobPeers as string);
+        if (isNaN(expectedLitePeersLength)) expectedLitePeersLength = 4;
+        if (isNaN(expectedBobPeersLength)) expectedBobPeersLength = 4;
         const mode: QueryPeersMode =
             (req.query.mode as QueryPeersMode) || "random";
         const trustedNode: boolean = req.query.trustedNode === "true";
@@ -118,15 +120,17 @@ router.post("/checkin", async (req, res) => {
         }
         lastCheckinMap[rateLimitKey] = now;
         // insert to mongodb
-        await Mongodb.getCheckinsCollection().insertOne({
+        const checkinDoc = {
             ...body,
             ip: ip,
             lastCheckinAt: Date.now(),
-        });
+        };
+        await Mongodb.getCheckinsCollection().insertOne(checkinDoc);
         MapService.enqueueServerForIpLookup(ip as string);
         if (IS_NO_DB) {
-            const peerType = body.type === "bob" ? "bob" : "lite";
             const ipStr = (String(ip).split(",")[0] || "").trim();
+            NodeService.addNoDbCheckin({ ...checkinDoc, ip: ipStr });
+            const peerType = body.type === "bob" ? "bob" : "lite";
             NodeService.addNoDbPeer(peerType, ipStr);
         }
         res.json({ message: "Checkin successful" });

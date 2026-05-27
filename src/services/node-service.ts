@@ -80,6 +80,18 @@ namespace NodeService {
         bob: new Map(),
     };
 
+    // NO_DB checkins mirror. Unbounded (acceptable: NO_DB is temp; restart clears it).
+    const _noDbCheckins: MongoDbTypes.Checkin[] = [];
+
+    export function addNoDbCheckin(doc: MongoDbTypes.Checkin): void {
+        if (!IS_NO_DB) return;
+        _noDbCheckins.push(doc);
+    }
+
+    export function getNoDbCheckins(): MongoDbTypes.Checkin[] {
+        return _noDbCheckins;
+    }
+
     function noDbAllPeers(type: "lite" | "bob"): string[] {
         return [..._noDbFile[type], ..._noDbRuntime[type].keys()];
     }

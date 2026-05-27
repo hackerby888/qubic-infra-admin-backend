@@ -1,12 +1,135 @@
-import { MongoClient, Db } from "mongodb";
+import { MongoClient, Db, Collection } from "mongodb";
 import { logger } from "../utils/logger.js";
 import type { IpInfo } from "../utils/ip.js";
 
 const uri = process.env.MONGO_URI || "mongodb://localhost:27017";
 const dbName = process.env.MONGO_DB_NAME || "qubic_nodes";
 
+export const IS_NO_DB =
+    process.env.NO_DB === "true" || process.env.NO_DB === "1";
+
 let client: MongoClient;
 let db: Db;
+
+function createStubCursor(): any {
+    const cursor: any = {
+        toArray: async () => [],
+        sort: () => cursor,
+        limit: () => cursor,
+        skip: () => cursor,
+        project: () => cursor,
+        map: () => cursor,
+        forEach: async () => {},
+        next: async () => null,
+        hasNext: async () => false,
+        close: async () => {},
+        [Symbol.asyncIterator]: async function* () {},
+    };
+    return cursor;
+}
+
+const stubCollectionCache: Record<string, any> = {};
+
+function createStubCollection<T extends Record<string, any>>(
+    name: string
+): Collection<T> {
+    if (stubCollectionCache[name]) return stubCollectionCache[name];
+    const handler: ProxyHandler<any> = {
+        get(_target, prop) {
+            // Avoid making the proxy look like a thenable — would hang `await`.
+            if (prop === "then" || prop === "catch" || prop === "finally")
+                return undefined;
+            if (typeof prop === "symbol") return undefined;
+            switch (prop) {
+                case "collectionName":
+                    return name;
+                case "find":
+                case "aggregate":
+                case "listIndexes":
+                case "listSearchIndexes":
+                    return () => createStubCursor();
+                case "findOne":
+                case "findOneAndUpdate":
+                case "findOneAndReplace":
+                case "findOneAndDelete":
+                    return async () => null;
+                case "insertOne":
+                    return async () => ({
+                        acknowledged: false,
+                        insertedId: null,
+                    });
+                case "insertMany":
+                    return async () => ({
+                        acknowledged: false,
+                        insertedCount: 0,
+                        insertedIds: {},
+                    });
+                case "updateOne":
+                case "updateMany":
+                case "replaceOne":
+                    return async () => ({
+                        acknowledged: false,
+                        matchedCount: 0,
+                        modifiedCount: 0,
+                        upsertedCount: 0,
+                        upsertedId: null,
+                    });
+                case "deleteOne":
+                case "deleteMany":
+                    return async () => ({
+                        acknowledged: false,
+                        deletedCount: 0,
+                    });
+                case "countDocuments":
+                case "estimatedDocumentCount":
+                    return async () => 0;
+                case "distinct":
+                    return async () => [];
+                case "createIndex":
+                case "createIndexes":
+                    return async () => "";
+                case "dropIndex":
+                case "dropIndexes":
+                case "drop":
+                    return async () => true;
+                case "bulkWrite":
+                    return async () => ({
+                        ok: 1,
+                        insertedCount: 0,
+                        matchedCount: 0,
+                        modifiedCount: 0,
+                        deletedCount: 0,
+                        upsertedCount: 0,
+                        insertedIds: {},
+                        upsertedIds: {},
+                    });
+                default:
+                    return async () => null;
+            }
+        },
+    };
+    const proxy = new Proxy({}, handler) as Collection<T>;
+    stubCollectionCache[name] = proxy;
+    return proxy;
+}
+
+let stubDb: Db | null = null;
+function getStubDb(): Db {
+    if (stubDb) return stubDb;
+    const handler: ProxyHandler<any> = {
+        get(_target, prop) {
+            if (prop === "then" || prop === "catch" || prop === "finally")
+                return undefined;
+            if (typeof prop === "symbol") return undefined;
+            if (prop === "collection") {
+                return (name: string) => createStubCollection(name);
+            }
+            return async () => null;
+        },
+    };
+    stubDb = new Proxy({}, handler) as Db;
+    return stubDb;
+}
 
 export namespace MongoDbTypes {
     export type NodeStatus =
@@ -158,6 +281,13 @@ export namespace Mongodb {
     const BOB_NODE_COLLECTION = "bob_nodes";
 
     export async function connectDB(): Promise<Db> {
+        if (IS_NO_DB) {
+            logger.info(
+                "🔌 NO_DB mode enabled — skipping MongoDB connection"
+            );
+            return getStubDb();
+        }
+
         if (db) return db; // reuse existing connection
 
         logger.info("🔌 Connecting to MongoDB...");
@@ -199,6 +329,9 @@ export namespace Mongodb {
     }
 
     export function getDB(): Db {
+        if (IS_NO_DB) {
+            return getStubDb();
+        }
         if (!db) {
             throw new Error("Database not connected. Call connectDB first.");
         }

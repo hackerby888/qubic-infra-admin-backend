@@ -1,6 +1,6 @@
 import express from "express";
 import { NodeService } from "../../services/node-service.js";
-import { Mongodb, MongoDbTypes } from "../../database/db.js";
+import { Mongodb, MongoDbTypes, IS_NO_DB } from "../../database/db.js";
 import { logger } from "../../utils/logger.js";
 import { lastCheckinMap } from "../../utils/common.js";
 import { MapService } from "../../services/map-service.js";
@@ -124,6 +124,11 @@ router.post("/checkin", async (req, res) => {
             lastCheckinAt: Date.now(),
         });
         MapService.enqueueServerForIpLookup(ip as string);
+        if (IS_NO_DB) {
+            const peerType = body.type === "bob" ? "bob" : "lite";
+            const ipStr = (String(ip).split(",")[0] || "").trim();
+            NodeService.addNoDbPeer(peerType, ipStr);
+        }
         res.json({ message: "Checkin successful" });
     } catch (error) {
         logger.error(`Error in checkin: ${(error as Error).message}`);

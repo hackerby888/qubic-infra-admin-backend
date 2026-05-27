@@ -1,4 +1,4 @@
-import { Mongodb, MongoDbTypes } from "../database/db.js";
+import { Mongodb, MongoDbTypes, IS_NO_DB } from "../database/db.js";
 import type { QueryPeersMode } from "../types/type.js";
 import { isNodeActive } from "../utils/common.js";
 import { Gmail } from "../utils/gmail.js";
@@ -9,6 +9,8 @@ import { sleep } from "../utils/time.js";
 import { Checkin } from "./logic/checkin.js";
 import { SSHService } from "./ssh-service.js";
 import * as geolib from "geolib";
+import { isIPv4 } from "net";
+import fs from "fs/promises";
 
 namespace NodeService {
     const IDLE_TIME = 1000; // 1 second
@@ -60,6 +62,94 @@ namespace NodeService {
     let _serverToOperatorMap: { [server: string]: string } = {};
     // IPs excluded from random-peers results (loaded from blacklisted_peers collection)
     let _blacklistedPeers: Set<string> = new Set();
+
+    // NO_DB mode peer pools. File-seeded peers are permanent (admin-curated).
+    // Runtime peers come from /checkin and are evictable once they fail liveness.
+    const NO_DB_RUNTIME_CAP = 10_000;
+    const NO_DB_EVICT_MS = 5 * 60 * 1000; // evict runtime peer if inactive 5min
+    const NO_DB_SWEEP_MS = 30 * 1000;
+    const _noDbFile: { lite: Set<string>; bob: Set<string> } = {
+        lite: new Set(),
+        bob: new Set(),
+    };
+    const _noDbRuntime: {
+        lite: Map<string, number>; // ip -> addedAt
+        bob: Map<string, number>;
+    } = {
+        lite: new Map(),
+        bob: new Map(),
+    };
+
+    function noDbAllPeers(type: "lite" | "bob"): string[] {
+        return [..._noDbFile[type], ..._noDbRuntime[type].keys()];
+    }
+
+    async function loadNoDbSeed() {
+        const path = `${process.cwd()}/data/peers.json`;
+        try {
+            const raw = await fs.readFile(path, "utf-8");
+            const parsed = JSON.parse(raw) as {
+                lite?: string[];
+                bob?: string[];
+            };
+            (parsed.lite || []).forEach((ip) => {
+                if (isIPv4(ip)) _noDbFile.lite.add(ip);
+            });
+            (parsed.bob || []).forEach((ip) => {
+                if (isIPv4(ip)) _noDbFile.bob.add(ip);
+            });
+            logger.info(
+                `🌱 NO_DB seed loaded: ${_noDbFile.lite.size} lite, ${_noDbFile.bob.size} bob (file)`
+            );
+        } catch (err: any) {
+            logger.warn(
+                `🌱 NO_DB seed not loaded (${err.message}); starting with empty pools`
+            );
+        }
+    }
+
+    export function addNoDbPeer(type: "lite" | "bob", ip: string): boolean {
+        if (!IS_NO_DB) return false;
+        if (!isIPv4(ip)) return false;
+        if (_noDbFile[type].has(ip)) return false;
+        const pool = _noDbRuntime[type];
+        if (pool.has(ip)) return false;
+        if (pool.size >= NO_DB_RUNTIME_CAP) return false;
+        pool.set(ip, Date.now());
+        logger.info(`🌱 NO_DB peer added (${type}, runtime): ${ip}`);
+        return true;
+    }
+
+    async function watchAndEvictNoDbPeers() {
+        while (true) {
+            await sleep(NO_DB_SWEEP_MS);
+            const now = Date.now();
+            const evict = (type: "lite" | "bob") => {
+                const pool = _noDbRuntime[type];
+                const statusMap =
+                    type === "lite"
+                        ? _statusCheckin.liteServers
+                        : _statusCheckin.bobServers;
+                let removed = 0;
+                for (const [ip, addedAt] of pool) {
+                    const tick = statusMap[ip]?.lastTickChanged ?? 0;
+                    const lastAlive = Math.max(tick, addedAt);
+                    if (now - lastAlive > NO_DB_EVICT_MS) {
+                        pool.delete(ip);
+                        delete statusMap[ip];
+                        removed++;
+                    }
+                }
+                if (removed > 0) {
+                    logger.info(
+                        `🌱 NO_DB evicted ${removed} stale ${type} peer(s); ${pool.size} remain`
+                    );
+                }
+            };
+            evict("lite");
+            evict("bob");
+        }
+    }
 
     let _status: {
         liteServers: {
@@ -398,11 +488,18 @@ namespace NodeService {
 
         const checkinNodesProcessor = async () => {
             while (true) {
-                let liteNodesFromCheckins = await Checkin.getCheckins({
-                    type: "lite",
-                    normalized: true,
-                    epoch: 0, // latest epoch
-                });
+                let liteNodesFromCheckins: { ip: string }[];
+                if (IS_NO_DB) {
+                    liteNodesFromCheckins = noDbAllPeers("lite").map((ip) => ({
+                        ip,
+                    }));
+                } else {
+                    liteNodesFromCheckins = await Checkin.getCheckins({
+                        type: "lite",
+                        normalized: true,
+                        epoch: 0, // latest epoch
+                    });
+                }
                 // filter out nodes that are already in system nodes to avoid duplication
                 liteNodesFromCheckins = liteNodesFromCheckins.filter(
                     (c) =>
@@ -500,11 +597,18 @@ namespace NodeService {
 
         const checkinNodesProcessor = async () => {
             while (true) {
-                let bobNodesFromCheckins = await Checkin.getCheckins({
-                    type: "bob",
-                    normalized: true,
-                    epoch: 0, // latest epoch
-                });
+                let bobNodesFromCheckins: { ip: string }[];
+                if (IS_NO_DB) {
+                    bobNodesFromCheckins = noDbAllPeers("bob").map((ip) => ({
+                        ip,
+                    }));
+                } else {
+                    bobNodesFromCheckins = await Checkin.getCheckins({
+                        type: "bob",
+                        normalized: true,
+                        epoch: 0, // latest epoch
+                    });
+                }
                 // filter out nodes that are already in system nodes to avoid duplication
                 bobNodesFromCheckins = bobNodesFromCheckins.filter(
                     (c) =>
@@ -1314,14 +1418,24 @@ namespace NodeService {
     }
 
     export async function start() {
+        if (IS_NO_DB) {
+            await loadNoDbSeed();
+        }
         await pullServerLists();
         await refreshBlacklistedPeers();
         watchLiteNodes();
         watchBobNodes();
         watchAndRefreshGroupIds();
-        watchAndSaveSnapshot();
-        watchMainNode();
-        watchAndPromoteMain();
+        if (!IS_NO_DB) {
+            watchAndSaveSnapshot();
+            watchMainNode();
+            watchAndPromoteMain();
+        } else {
+            watchAndEvictNoDbPeers();
+            logger.info(
+                "🌱 NO_DB: skipping watchAndSaveSnapshot, watchMainNode, watchAndPromoteMain"
+            );
+        }
     }
 }
 

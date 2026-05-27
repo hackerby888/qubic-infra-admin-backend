@@ -2,7 +2,7 @@ import "dotenv/config";
 import { GithubService } from "./services/github-service.js";
 import { HttpServer } from "./http/http-server.js";
 import { NodeService } from "./services/node-service.js";
-import { Mongodb } from "./database/db.js";
+import { Mongodb, IS_NO_DB } from "./database/db.js";
 import { SocketServer } from "./http/socket-server.js";
 import { MapService } from "./services/map-service.js";
 import { lastCheckinMap } from "./utils/common.js";
@@ -28,7 +28,13 @@ function checkEnvVariables() {
         "ALERT_EMAIL_RECIPIENTS",
     ];
 
-    requiredVars.forEach((varName) => {
+    const filtered = IS_NO_DB
+        ? requiredVars.filter(
+              (v) => v !== "MONGO_URI" && v !== "MONGO_DB_NAME"
+          )
+        : requiredVars;
+
+    filtered.forEach((varName) => {
         if (!process.env[varName]) {
             console.error(
                 `Error: Missing required environment variable ${varName}`

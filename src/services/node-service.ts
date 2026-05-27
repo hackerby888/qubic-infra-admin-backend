@@ -848,6 +848,7 @@ namespace NodeService {
 
         let distanceMap: { server: string; distance: number }[] = [];
         if (mode === "closest" && clientIpInfo) {
+            let serversWithoutIpInfo: string[] = [];
             candidateServers.forEach((server) => {
                 let serverIpInfo = _ipInfoCache[server];
                 if (serverIpInfo) {
@@ -862,16 +863,27 @@ namespace NodeService {
                         }
                     );
                     distanceMap.push({ server: server, distance });
+                } else {
+                    serversWithoutIpInfo.push(server);
                 }
             });
 
             // sort by distance
             distanceMap.sort((a, b) => a.distance - b.distance);
 
-            // return top n closest nodes that are active
-            selectedServers = distanceMap.slice(0, n).map((item) => {
-                return candidateServers.find((s) => s === item.server)!;
-            });
+            // take top n closest nodes with known ipinfo
+            selectedServers = distanceMap.slice(0, n).map((item) => item.server);
+
+            // fill remaining slots with random peers lacking ipinfo
+            let remaining = n - selectedServers.length;
+            while (remaining > 0 && serversWithoutIpInfo.length > 0) {
+                let idx = Math.floor(
+                    Math.random() * serversWithoutIpInfo.length
+                );
+                selectedServers.push(serversWithoutIpInfo[idx]!);
+                serversWithoutIpInfo.splice(idx, 1);
+                remaining--;
+            }
 
             return selectedServers;
         }
@@ -951,6 +963,7 @@ namespace NodeService {
 
         let distanceMap: { server: string; distance: number }[] = [];
         if (mode === "closest" && clientIpInfo) {
+            let serversWithoutIpInfo: string[] = [];
             candidateServers.forEach((server) => {
                 let serverIpInfo = _ipInfoCache[server];
                 if (serverIpInfo) {
@@ -965,16 +978,27 @@ namespace NodeService {
                         }
                     );
                     distanceMap.push({ server: server, distance });
+                } else {
+                    serversWithoutIpInfo.push(server);
                 }
             });
 
             // sort by distance
             distanceMap.sort((a, b) => a.distance - b.distance);
 
-            // return top n closest nodes that are active
-            selectedServers = distanceMap.slice(0, n).map((item) => {
-                return candidateServers.find((s) => s === item.server)!;
-            });
+            // take top n closest nodes with known ipinfo
+            selectedServers = distanceMap.slice(0, n).map((item) => item.server);
+
+            // fill remaining slots with random peers lacking ipinfo
+            let remaining = n - selectedServers.length;
+            while (remaining > 0 && serversWithoutIpInfo.length > 0) {
+                let idx = Math.floor(
+                    Math.random() * serversWithoutIpInfo.length
+                );
+                selectedServers.push(serversWithoutIpInfo[idx]!);
+                serversWithoutIpInfo.splice(idx, 1);
+                remaining--;
+            }
 
             return selectedServers;
         }

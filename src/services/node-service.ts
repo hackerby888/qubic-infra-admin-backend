@@ -1174,6 +1174,77 @@ namespace NodeService {
         }
     }
 
+    const TTYD_WATCHDOG_INTERVAL_MS = 60_000;
+    const TTYD_DEFAULT_PORT = 7681;
+
+    // Single self-contained shell snippet: probe ttyd's TLS port and only
+    // restart (relaunch the screen session) if it's dead/unreachable. Kept on
+    // one line because executeCommands writes each array entry as one shell
+    // line. Wrapped in if/else so it always exits 0 — executeCommands prepends
+    // `set -e`, and a failed /dev/tcp probe would otherwise kill the shell.
+    // Mirrors the launch line in buildTtydInstallCommands (commands.routes.ts):
+    // same binary path, cert paths and screen session name. Does NOT reinstall
+    // — if the binary is gone we skip (that's an uninstall, not a crash).
+    function buildTtydReviveCommand(token: string, port: number): string {
+        return [
+            `if bash -c "exec 3<>/dev/tcp/127.0.0.1/${port}" 2>/dev/null; then`,
+            `echo "ttyd-watchdog: OK :${port}";`,
+            `elif [ ! -x /usr/local/bin/ttyd ]; then`,
+            `echo "ttyd-watchdog: binary missing, skip";`,
+            `else`,
+            `for s in $(screen -ls | awk '/ttyd/ {print $1}'); do screen -S "$s" -X quit || true; done;`,
+            `pkill -f /usr/local/bin/ttyd || true;`,
+            `screen -dmS ttyd bash -lc "/usr/local/bin/ttyd -W -p ${port} -b /${token} -S -C /etc/ttyd-cert.pem -K /etc/ttyd-key.pem bash -l || exec bash";`,
+            `sleep 2;`,
+            `bash -c "exec 3<>/dev/tcp/127.0.0.1/${port}" 2>/dev/null && echo "ttyd-watchdog: RESTARTED :${port}" || echo "ttyd-watchdog: RESTART FAILED :${port}";`,
+            `fi`,
+        ].join(" ");
+    }
+
+    // Watchdog for the ttyd SSH-console server on each managed host. Restarts it
+    // if the port is unreachable (process crashed, screen session died, OOM, etc.).
+    async function watchTtydConsoles() {
+        while (true) {
+            try {
+                const servers = (await Mongodb.getServersCollection()
+                    .find({ ttyd: { $exists: true } })
+                    .toArray()) as MongoDbTypes.Server[];
+
+                await Promise.allSettled(
+                    servers.map(async (s) => {
+                        if (!s.ttyd?.token || !s.username) return;
+                        const port = s.ttyd.port || TTYD_DEFAULT_PORT;
+                        const res = await SSHService.executeCommands(
+                            s.server,
+                            s.username,
+                            s.password,
+                            [buildTtydReviveCommand(s.ttyd.token, port)],
+                            60_000,
+                            { sshPrivateKey: s.sshPrivateKey }
+                        );
+                        const out =
+                            (res.stdouts["shell"] || "") +
+                            (res.stderrs["shell"] || "");
+                        if (out.includes("RESTART FAILED")) {
+                            logger.error(
+                                `ttyd watchdog: restart FAILED on ${s.server} (:${port})`
+                            );
+                        } else if (out.includes("RESTARTED")) {
+                            logger.warn(
+                                `ttyd watchdog: ttyd was down, restarted on ${s.server} (:${port})`
+                            );
+                        }
+                    })
+                );
+            } catch (error) {
+                logger.error(
+                    `Error in watchTtydConsoles: ${(error as Error).message}`
+                );
+            }
+            await sleep(TTYD_WATCHDOG_INTERVAL_MS);
+        }
+    }
+
     export interface MainNodeEvent {
         type: "promote" | "demote";
         server: string;
@@ -1466,6 +1537,7 @@ namespace NodeService {
             watchAndSaveSnapshot();
             watchMainNode();
             watchAndPromoteMain();
+            watchTtydConsoles();
         } else {
             watchAndEvictNoDbPeers();
             logger.info(

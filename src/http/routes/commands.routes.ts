@@ -398,7 +398,10 @@ router.post("/execute-command", authenticateToken, async (req, res) => {
                     // don't accumulate dead files. Don't fail if it isn't there.
                     `OLD_BINARY=$(cat binary_name.txt 2>/dev/null || echo "")`,
                     `[ -n "$OLD_BINARY" ] && rm -f "$OLD_BINARY" || true`,
-                    `wget ${url}`,
+                    // -O so a re-deploy overwrites in place instead of letting
+                    // wget save Qubic.1 (lite releases all reuse the name "Qubic",
+                    // which would then mismatch binary_name.txt and run the old file).
+                    `wget -O "$(basename ${url})" ${url}`,
                     `chmod +x $(basename ${url})`,
                     // Persist the new binary name so the restart command picks it up.
                     `basename ${url} > binary_name.txt`,

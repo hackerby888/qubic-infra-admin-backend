@@ -229,6 +229,84 @@ router.post(
     }
 );
 
+// Apply one custom parameter to every lite node owned by the operator
+// (admin = all lite nodes). Nodes whose stored value already equals the
+// target are left untouched (no-op). DB write only — takes effect on each
+// node's next deploy/restart, same as the per-machine endpoint.
+router.post(
+    "/set-all-lite-nodes-custom-parameter",
+    authenticateToken,
+    async (req, res) => {
+        try {
+            let operator = req.user!.username;
+            let { customParameter } = req.body as {
+                customParameter: string;
+            };
+            if (typeof customParameter !== "string") {
+                res.status(400).json({ error: "customParameter must be a string" });
+                return;
+            }
+
+            let serverDocs = await Mongodb.getServersCollection()
+                .find({
+                    services: MongoDbTypes.ServiceType.LiteNode,
+                    ...(operator !== "admin" ? { operator } : {}),
+                })
+                .toArray();
+            let serverNames = serverDocs.map((doc) => doc.server);
+
+            if (serverNames.length === 0) {
+                res.json({
+                    message: "No lite nodes found",
+                    total: 0,
+                    updated: 0,
+                    skipped: 0,
+                });
+                return;
+            }
+
+            // Figure out which nodes already hold the target value (no-op)
+            // vs. which need writing.
+            let liteDocs = await Mongodb.getLiteNodeCollection()
+                .find({ server: { $in: serverNames } })
+                .toArray();
+            let existing: Record<string, string> = {};
+            for (let doc of liteDocs) {
+                existing[doc.server] = doc.customParameter || "";
+            }
+            let serversToUpdate = serverNames.filter(
+                (server) => (existing[server] ?? "") !== customParameter
+            );
+
+            if (serversToUpdate.length > 0) {
+                await Mongodb.getLiteNodeCollection().bulkWrite(
+                    serversToUpdate.map((server) => ({
+                        updateOne: {
+                            filter: { server },
+                            update: { $set: { customParameter } },
+                            upsert: true,
+                        },
+                    }))
+                );
+            }
+
+            res.json({
+                message: "Custom parameter applied to all lite nodes",
+                total: serverNames.length,
+                updated: serversToUpdate.length,
+                skipped: serverNames.length - serversToUpdate.length,
+            });
+        } catch (error) {
+            logger.error(
+                `Error setting custom parameter for all lite nodes: ${
+                    (error as Error).message
+                }`
+            );
+            res.status(500).json({ error: "Internal server error" });
+        }
+    }
+);
+
 router.get("/request-shudown", async (req, res) => {
     let server = req.query.server as string;
     if (!server) {

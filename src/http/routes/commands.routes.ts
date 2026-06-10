@@ -248,6 +248,22 @@ router.post("/command", authenticateToken, async (req, res) => {
                 }
             }
         } else if (command == "restart") {
+            // Pull the current custom parameter for every lite node being
+            // restarted so the restart re-applies the latest DB value. A plain
+            // restart used to keep whatever was last written to disk at deploy
+            // time; now it picks up parameter changes too (same as a redeploy).
+            // Bob nodes have no custom parameter.
+            let liteParamMap: Record<string, string> = {};
+            if (services.includes(MongoDbTypes.ServiceType.LiteNode)) {
+                let liteDocs = await Mongodb.getLiteNodeCollection()
+                    .find({
+                        server: { $in: serverDocs.map((s) => s.server) },
+                    })
+                    .toArray();
+                for (let doc of liteDocs) {
+                    liteParamMap[doc.server] = doc.customParameter || "";
+                }
+            }
             for (let service of services) {
                 for (let serverObject of serverDocs) {
                     if (!serverObject.services.includes(service)) {
@@ -267,6 +283,11 @@ router.post("/command", authenticateToken, async (req, res) => {
                         service,
                         {
                             systemRamInGB: parseInt(serverObject.ram || "0"),
+                            customParameter:
+                                service ===
+                                MongoDbTypes.ServiceType.LiteNode
+                                    ? liteParamMap[serverObject.server] ?? ""
+                                    : undefined,
                         }
                     )
                         .then(

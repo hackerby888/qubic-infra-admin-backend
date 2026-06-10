@@ -98,7 +98,7 @@ export namespace SSHService {
             ids?: string[];
             loggingPasscode?: string;
             operatorId?: string;
-            customParameter?: string;
+            customParameter?: string | undefined;
         }) {
             const FINAL_START_COMMAND = `screen -dmS ${LITE_SCREEN_NAME} bash -lc "./$CURRENT_BINARY -s 32 --peers $CURRENT_PEERS $SEEDS_ARG --node-mode $MAIN_AUX_STATUS --reader-passcode $LOGGING_PASSCODE --operator $OPERATOR_ID $CUSTOM_PARAMETER || exec bash"`;
             // If isRestart is true, skip setup steps and just start the node with existing configs
@@ -106,6 +106,15 @@ export namespace SSHService {
                 return [
                     `cd ~`,
                     `cd qlite`,
+                    // When a customParameter is supplied to a restart, overwrite
+                    // the on-disk file first so the node comes back up with the
+                    // new value immediately (apply-now). When undefined, the
+                    // existing file is left untouched (plain restart).
+                    ...(customParameter !== undefined
+                        ? [
+                              `echo "${customParameter}" > custom_parameter.txt`,
+                          ]
+                        : []),
                     `CURRENT_PEERS=$(cat peers.txt)`,
                     `CURRENT_BINARY=$(cat binary_name.txt)`,
                     `IDS=$(cat ids.txt)`,
@@ -289,8 +298,10 @@ export namespace SSHService {
             type: MongoDbTypes.ServiceType,
             {
                 systemRamInGB,
+                customParameter,
             }: {
                 systemRamInGB: number;
+                customParameter?: string | undefined;
             }
         ) {
             if (type === MongoDbTypes.ServiceType.LiteNode) {
@@ -299,6 +310,7 @@ export namespace SSHService {
                     epochFile: "",
                     peers: [],
                     isRestart: true,
+                    customParameter,
                 });
                 return [
                     this.getShutdownCommands(type).join("; "),
@@ -535,11 +547,15 @@ export namespace SSHService {
         password: string,
         sshPrivateKey: string,
         type: MongoDbTypes.ServiceType,
-        { systemRamInGB }: { systemRamInGB: number }
+        {
+            systemRamInGB,
+            customParameter,
+        }: { systemRamInGB: number; customParameter?: string | undefined }
     ) {
         let commands: string[] = [];
         for (const cmd of Scripts.getRestartCommands(type, {
             systemRamInGB,
+            customParameter,
         })) {
             if (cmd && cmd?.trim() !== "") commands.push(cmd);
         }

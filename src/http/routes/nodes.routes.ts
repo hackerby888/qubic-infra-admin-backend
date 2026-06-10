@@ -185,6 +185,52 @@ router.get("/lite-node-custom-parameter", authenticateToken, async (req, res) =>
     }
 });
 
+// Current custom parameter across every lite node owned by the operator
+// (admin = all). Used to prefill the bulk dialog. `uniform` is true when all
+// nodes share one value (then `value` holds it); when they differ, `value` is
+// "" and the caller can show a "mixed" hint.
+router.get(
+    "/all-lite-nodes-custom-parameter",
+    authenticateToken,
+    async (req, res) => {
+        try {
+            let operator = req.user!.username;
+            let serverDocs = await Mongodb.getServersCollection()
+                .find({
+                    services: MongoDbTypes.ServiceType.LiteNode,
+                    ...(operator !== "admin" ? { operator } : {}),
+                })
+                .toArray();
+            let serverNames = serverDocs.map((doc) => doc.server);
+
+            let liteDocs = await Mongodb.getLiteNodeCollection()
+                .find({ server: { $in: serverNames } })
+                .toArray();
+            let valueBy: Record<string, string> = {};
+            for (let doc of liteDocs) {
+                valueBy[doc.server] = doc.customParameter || "";
+            }
+            // Treat nodes with no lite doc as empty string.
+            let values = serverNames.map((name) => valueBy[name] ?? "");
+            let distinct = Array.from(new Set(values));
+            let uniform = distinct.length <= 1;
+
+            res.json({
+                value: uniform ? distinct[0] ?? "" : "",
+                uniform,
+                total: serverNames.length,
+            });
+        } catch (error) {
+            logger.error(
+                `Error getting custom parameter for all lite nodes: ${
+                    (error as Error).message
+                }`
+            );
+            res.status(500).json({ error: "Internal server error" });
+        }
+    }
+);
+
 router.post(
     "/set-lite-node-custom-parameter",
     authenticateToken,

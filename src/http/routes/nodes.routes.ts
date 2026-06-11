@@ -1,6 +1,7 @@
 import express from "express";
 import { NodeService } from "../../services/node-service.js";
 import { Mongodb, MongoDbTypes } from "../../database/db.js";
+import { SSHService } from "../../services/ssh-service.js";
 import { logger } from "../../utils/logger.js";
 import { authenticateToken } from "../middleware/auth.middleware.js";
 import jwt from "jsonwebtoken";
@@ -265,7 +266,35 @@ router.post(
                 { $set: { customParameter } },
                 { upsert: true }
             );
-            res.json({ message: "Custom parameter updated successfully" });
+
+            // Write custom_parameter.txt on the node now so the value is on disk
+            // immediately (picked up on the next restart/redeploy). DB write is
+            // authoritative; an SSH failure (e.g. node not yet deployed) is
+            // non-fatal and only reported in the response.
+            let written = false;
+            try {
+                let result = await SSHService.writeLiteNodeCustomParameter(
+                    serverDoc.server,
+                    serverDoc.username,
+                    serverDoc.password,
+                    serverDoc.sshPrivateKey,
+                    customParameter
+                );
+                written = result.isSuccess;
+            } catch (sshError) {
+                logger.warn(
+                    `Saved custom parameter for ${server} to DB but failed to write custom_parameter.txt on node: ${
+                        (sshError as Error).message
+                    }`
+                );
+            }
+
+            res.json({
+                message: written
+                    ? "Custom parameter updated and written to node"
+                    : "Custom parameter saved (will apply on next deploy/restart)",
+                written,
+            });
         } catch (error) {
             logger.error(
                 `Error setting custom parameter: ${(error as Error).message}`

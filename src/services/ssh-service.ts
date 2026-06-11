@@ -541,6 +541,39 @@ export namespace SSHService {
         };
     }
 
+    // Write the lite node's custom_parameter.txt on disk without restarting.
+    // The new value sits in ~/qlite/custom_parameter.txt and is picked up on
+    // the next restart/redeploy. Fails (isSuccess=false) if the node has not
+    // been deployed yet (no qlite dir).
+    export async function writeLiteNodeCustomParameter(
+        host: string,
+        username: string,
+        password: string,
+        sshPrivateKey: string,
+        customParameter: string
+    ) {
+        let commands = [
+            `cd ~/qlite && echo "${customParameter}" > custom_parameter.txt`,
+        ];
+        let result = await executeCommands(
+            host,
+            username,
+            password,
+            commands,
+            60 * 1000, // 1 min
+            {
+                isNonInteractive: true,
+                sshPrivateKey: sshPrivateKey,
+            }
+        );
+        return {
+            stdouts: result.stdouts,
+            stderrs: result.stderrs,
+            isSuccess: result.isSuccess,
+            duration: result.duration,
+        };
+    }
+
     export async function restartNode(
         host: string,
         username: string,

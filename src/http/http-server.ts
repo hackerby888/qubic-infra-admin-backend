@@ -8,6 +8,9 @@ import https from "https";
 namespace HttpServer {
     export async function start() {
         const app = express();
+        // Behind a reverse proxy (Cloudflare / nginx / LB): make req.ip resolve
+        // to the real client via X-Forwarded-For instead of the proxy's IP.
+        app.set("trust proxy", true);
         app.use(express.json());
         app.use(cors());
         const port = parseInt(process.env.PORT || "3000");

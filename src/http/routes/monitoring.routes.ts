@@ -6,14 +6,14 @@ import { lastCheckinMap } from "../../utils/common.js";
 import { MapService } from "../../services/map-service.js";
 import { Checkin } from "../../services/logic/checkin.js";
 import type { QueryPeersMode } from "../../types/type.js";
-import type { IpInfo } from "../../utils/ip.js";
+import { type IpInfo, getClientIp } from "../../utils/ip.js";
 import { isIPv4 } from "net";
 
 const router = express.Router();
 
 router.get("/random-peers", async (req, res) => {
     try {
-        let clientIpV4 = req.ip;
+        let clientIpV4 = getClientIp(req);
         let clientIpInfo: IpInfo | null = null;
         if (clientIpV4 && isIPv4(clientIpV4) && clientIpV4 != "127.0.0.1") {
             clientIpInfo = await MapService.getIpInfoForServer(clientIpV4, {
@@ -79,7 +79,7 @@ router.get("/random-peers", async (req, res) => {
 router.post("/checkin", async (req, res) => {
     try {
         let body = req.body;
-        let ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+        let ip = getClientIp(req);
         // check if body is object (valid json)
         if (typeof body !== "object") {
             res.status(400).json({ error: "Invalid JSON body" });
@@ -126,12 +126,11 @@ router.post("/checkin", async (req, res) => {
             lastCheckinAt: Date.now(),
         };
         await Mongodb.getCheckinsCollection().insertOne(checkinDoc);
-        MapService.enqueueServerForIpLookup(ip as string);
+        MapService.enqueueServerForIpLookup(ip);
         if (IS_NO_DB) {
-            const ipStr = (String(ip).split(",")[0] || "").trim();
-            NodeService.addNoDbCheckin({ ...checkinDoc, ip: ipStr });
+            NodeService.addNoDbCheckin({ ...checkinDoc, ip });
             const peerType = body.type === "bob" ? "bob" : "lite";
-            NodeService.addNoDbPeer(peerType, ipStr);
+            NodeService.addNoDbPeer(peerType, ip);
         }
         res.json({ message: "Checkin successful" });
     } catch (error) {

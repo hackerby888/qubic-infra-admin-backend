@@ -1,5 +1,6 @@
 import { Mongodb, type MongoDbTypes, IS_NO_DB } from "../../database/db.js";
 import { getLastWednesdayTimestamp } from "../../utils/time.js";
+import { normalizeIp } from "../../utils/ip.js";
 import { NodeService } from "../node-service.js";
 import NodeCache from "node-cache";
 
@@ -169,10 +170,10 @@ namespace Checkin {
             checkins = Object.values(mergedCheckins) as MongoDbTypes.Checkin[];
         }
 
-        // reformat ip from db (if ipv6 format, convert to ipv4
+        // normalize ip from db (strip IPv4-mapped IPv6 prefix on legacy rows)
         checkins = checkins.map((checkin) => {
-            if (checkin.ip && checkin.ip.startsWith("::ffff:")) {
-                checkin.ip = checkin.ip.replace("::ffff:", "");
+            if (checkin.ip) {
+                checkin.ip = normalizeIp(checkin.ip);
             }
             return checkin;
         });

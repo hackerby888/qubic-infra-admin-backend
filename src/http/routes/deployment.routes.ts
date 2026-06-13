@@ -372,6 +372,9 @@ router.post("/deploy", authenticateToken, async (req, res) => {
                                 .catch(() => {});
                         });
                     } else {
+                        const reason =
+                            result.errorMessage ||
+                            `Deployment failed on ${server.server}`;
                         databaseUpdater({
                             server: server.server,
                             service: service,
@@ -382,9 +385,9 @@ router.post("/deploy", authenticateToken, async (req, res) => {
                                 Object.values(result.stdouts).join(
                                     "\n"
                                 ),
-                            stderr: Object.values(result.stderrs).join(
-                                "\n"
-                            ),
+                            stderr:
+                                `⛔ ${reason}\n` +
+                                Object.values(result.stderrs).join("\n"),
                             status: "error",
                         });
                     }

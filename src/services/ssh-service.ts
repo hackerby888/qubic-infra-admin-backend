@@ -509,6 +509,8 @@ export namespace SSHService {
                 sysInfo.stdouts[systemInfoCommands.ram]?.replaceAll("\n", "") ||
                 "",
             duration: result.duration + sysInfo.duration,
+            errorCategory: result.errorCategory,
+            errorMessage: result.errorMessage,
         };
     }
 
@@ -538,6 +540,8 @@ export namespace SSHService {
             stderrs: result.stderrs,
             isSuccess: result.isSuccess,
             duration: result.duration,
+            errorCategory: result.errorCategory,
+            errorMessage: result.errorMessage,
         };
     }
 
@@ -571,6 +575,8 @@ export namespace SSHService {
             stderrs: result.stderrs,
             isSuccess: result.isSuccess,
             duration: result.duration,
+            errorCategory: result.errorCategory,
+            errorMessage: result.errorMessage,
         };
     }
 
@@ -609,6 +615,8 @@ export namespace SSHService {
             stderrs: result.stderrs,
             isSuccess: result.isSuccess,
             duration: result.duration,
+            errorCategory: result.errorCategory,
+            errorMessage: result.errorMessage,
         };
     }
 
@@ -655,11 +663,16 @@ export namespace SSHService {
             stderrs: { [key: string]: string };
             isSuccess: boolean;
             duration: number;
+            errorCategory?: SSHErrorCategory;
+            errorMessage?: string;
         } = {
             stdouts: {},
             stderrs: {},
             isSuccess: false,
             duration: 0,
+            errorCategory: "unknown",
+            errorMessage:
+                "Deployment failed before SSH execution completed (see backend logs).",
         };
 
         try {
@@ -738,10 +751,86 @@ export namespace SSHService {
                 stderrs: result.stderrs,
                 isSuccess: result.isSuccess,
                 duration: result.duration,
+                errorCategory: result.errorCategory,
+                errorMessage: result.errorMessage,
             };
         } catch (error) {
-            return returnFailedObject;
+            return {
+                ...returnFailedObject,
+                errorMessage: (error as Error).message,
+            };
         }
+    }
+
+    export type SSHErrorCategory =
+        | "connect_timeout"
+        | "connect_refused"
+        | "host_unreachable"
+        | "auth_failed"
+        | "command_timeout"
+        | "command_failed"
+        | "unknown";
+
+    // Map a raw ssh2 / node socket error to a clear, operator-facing category
+    // and message so the UI and logs can show *what* went wrong (refused vs.
+    // auth vs. DNS vs. timeout) instead of an opaque "isSuccess: false".
+    function _classifySSHConnectionError(error: Error): {
+        category: SSHErrorCategory;
+        message: string;
+    } {
+        const code = (error as any)?.code || (error as any)?.errno || "";
+        const raw = error?.message || String(error);
+        const lower = `${code} ${raw}`.toLowerCase();
+
+        if (lower.includes("econnrefused"))
+            return {
+                category: "connect_refused",
+                message: `Connection refused — nothing listening on the SSH port (${raw}).`,
+            };
+        if (
+            lower.includes("ehostunreach") ||
+            lower.includes("enetunreach") ||
+            lower.includes("enotfound") ||
+            lower.includes("eai_again") ||
+            lower.includes("getaddrinfo")
+        )
+            return {
+                category: "host_unreachable",
+                message: `Host unreachable / DNS lookup failed (${raw}).`,
+            };
+        if (
+            lower.includes("authentication") ||
+            lower.includes("all configured authentication methods failed") ||
+            lower.includes("permission denied")
+        )
+            return {
+                category: "auth_failed",
+                message: `SSH authentication failed — bad credentials or key (${raw}).`,
+            };
+        if (
+            lower.includes("etimedout") ||
+            lower.includes("timed out") ||
+            lower.includes("handshake")
+        )
+            return {
+                category: "connect_timeout",
+                message: `SSH connection/handshake timed out (${raw}).`,
+            };
+        return { category: "unknown", message: raw };
+    }
+
+    function _logLoudSSHError(
+        host: string,
+        username: string,
+        category: SSHErrorCategory,
+        message: string,
+        elapsedMs: number
+    ) {
+        logger.error(
+            `⛔ SSH ${category.toUpperCase()} @ ${username}@${host} after ${Math.round(
+                elapsedMs / 1000
+            )}s: ${message}`
+        );
     }
 
     /**
@@ -751,7 +840,8 @@ export namespace SSHService {
      * @param password
      * @param commands array of commands to execute
      * @param timeout in millis seconds, 0 means no timeout
-     * @returns
+     * @returns stdouts/stderrs per command, isSuccess, duration, and on
+     *          failure a clear errorCategory + errorMessage.
      */
     export async function executeCommands(
         host: string,
@@ -774,15 +864,26 @@ export namespace SSHService {
             [key: string]: string;
         } = {};
         let isSuccess = false;
+        let errorCategory: SSHErrorCategory | undefined;
+        let errorMessage: string | undefined;
 
         let port;
         try {
             port = await _getServerSSHPort(host);
         } catch (error) {
-            stderrs["shell"] = `Failed to get server SSH port from database: ${
+            errorCategory = "unknown";
+            errorMessage = `Failed to get server SSH port from database: ${
                 (error as Error).message
             }`;
-            return { stdouts, stderrs, isSuccess, duration: 0 };
+            stderrs["shell"] = errorMessage;
+            return {
+                stdouts,
+                stderrs,
+                isSuccess,
+                duration: 0,
+                errorCategory,
+                errorMessage,
+            };
         }
 
         let liteNodeInfo = NodeService.getLiteNodeInfo(host);
@@ -801,6 +902,18 @@ export namespace SSHService {
 
         commands.unshift("exec 2>&1"); // Redirect stderr to stdout
         commands.filter((cmd) => cmd && !cmd.trim().startsWith("#"));
+
+        // Lifted to function scope so the timeout fires across BOTH the connect
+        // and exec phases, and so the final catch can clear it.
+        let isReady = false;
+        let isFinallyDone = false;
+        let overallTimeout: NodeJS.Timeout | undefined;
+        const clearOverallTimeout = () => {
+            if (overallTimeout) {
+                clearTimeout(overallTimeout);
+                overallTimeout = undefined;
+            }
+        };
 
         try {
             const emitter = new EventEmitter();
@@ -839,14 +952,7 @@ export namespace SSHService {
                 }
             };
             conn.on("ready", async () => {
-                // Timeout handling
-                if (timeout > 0) {
-                    setTimeout(() => {
-                        if (isFinallyDone) return;
-                        emitter.emit("error", new Error("SSH command timeout"));
-                    }, timeout);
-                }
-
+                isReady = true;
                 logger.info(
                     `SSH Connection ready for ${host}@${username}. Executing commands...`
                 );
@@ -934,6 +1040,25 @@ export namespace SSHService {
                 emitter.emit("error", err);
             });
 
+            // Single timeout covering BOTH connect and exec. Fires loudly with
+            // a category that distinguishes a stuck handshake (connect_timeout)
+            // from a hung remote command (command_timeout). timeout==0 (e.g.
+            // long-lived log streams) intentionally arms nothing.
+            if (timeout > 0) {
+                overallTimeout = setTimeout(() => {
+                    if (isFinallyDone) return;
+                    const phase: SSHErrorCategory = isReady
+                        ? "command_timeout"
+                        : "connect_timeout";
+                    const msg = isReady
+                        ? `Remote command did not finish within ${timeout}ms — aborted. The command is hung or the host is unresponsive.`
+                        : `SSH connection/handshake did not complete within ${timeout}ms.`;
+                    const err = new Error(msg);
+                    (err as any).sshCategory = phase;
+                    emitter.emit("error", err);
+                }, timeout);
+            }
+
             conn.connect({
                 host: host,
                 port: port,
@@ -946,44 +1071,87 @@ export namespace SSHService {
                 readyTimeout: 60_000,
             });
 
-            let isFinallyDone = false;
-
-            await new Promise<void>((resolve, reject) => {
+            await new Promise<void>((resolve) => {
                 emitter.on("done", ({ isDoneSignalReceived }) => {
                     if (isFinallyDone) return;
-
+                    clearOverallTimeout();
                     if (cleanUpSSHMap[host]) {
                         cleanUpSSHMap[host]();
                     }
                     isSuccess = isDoneSignalReceived;
                     isFinallyDone = true;
+
+                    if (!isSuccess) {
+                        errorCategory = "command_failed";
+                        errorMessage =
+                            "One or more remote commands exited non-zero (the run was aborted by `set -e`).";
+                        stderrs["shell"] =
+                            (stderrs["shell"] || "") +
+                            `\n⛔ SSH COMMAND_FAILED @ ${username}@${host}: ${errorMessage}\n`;
+                        _logLoudSSHError(
+                            host,
+                            username,
+                            errorCategory,
+                            errorMessage,
+                            Date.now() - startTime
+                        );
+                    } else {
+                        logger.info(
+                            `SSH command execution for ${host}@${username} done.`
+                        );
+                    }
                     resolve();
-                    logger.info(
-                        `SSH command execution for ${host}@${username} done.`
-                    );
                 });
 
                 emitter.on("error", (error) => {
                     if (isFinallyDone) return;
-
+                    clearOverallTimeout();
                     if (cleanUpSSHMap[host]) {
                         cleanUpSSHMap[host]();
                     }
                     isSuccess = false;
                     isFinallyDone = true;
-                    resolve();
-                    logger.error(
-                        `SSH command execution for ${host}@${username} error: ${error}`
+
+                    let category: SSHErrorCategory | undefined = (error as any)
+                        ?.sshCategory;
+                    let message: string;
+                    if (category) {
+                        message = error.message;
+                    } else {
+                        const classified = _classifySSHConnectionError(error);
+                        category = classified.category;
+                        message = classified.message;
+                    }
+                    errorCategory = category;
+                    errorMessage = message;
+                    stderrs["shell"] =
+                        (stderrs["shell"] || "") +
+                        `\n⛔ SSH ${category.toUpperCase()} @ ${username}@${host}: ${message}\n`;
+                    _logLoudSSHError(
+                        host,
+                        username,
+                        category,
+                        message,
+                        Date.now() - startTime
                     );
-                    stderrs["shell"] = (stderrs["shell"] || "") + error.message;
+                    resolve();
                 });
             });
         } catch (error) {
-            logger.error(
-                `SSH command execution for ${host}@${username} error: ${error}`
-            );
+            clearOverallTimeout();
+            const classified = _classifySSHConnectionError(error as Error);
+            errorCategory = errorCategory || classified.category;
+            errorMessage = errorMessage || classified.message;
             stderrs["shell"] =
-                (stderrs["shell"] || "") + (error as Error).message;
+                (stderrs["shell"] || "") +
+                `\n⛔ SSH ${errorCategory.toUpperCase()} @ ${username}@${host}: ${errorMessage}\n`;
+            _logLoudSSHError(
+                host,
+                username,
+                errorCategory,
+                errorMessage,
+                Date.now() - startTime
+            );
             isSuccess = false;
         }
 
@@ -991,7 +1159,14 @@ export namespace SSHService {
         let endTime = Date.now();
         let durationInMillis = endTime - startTime;
         delete cleanUpSSHMap[host];
-        return { stdouts, stderrs, isSuccess, duration: durationInMillis };
+        return {
+            stdouts,
+            stderrs,
+            isSuccess,
+            duration: durationInMillis,
+            errorCategory,
+            errorMessage,
+        };
     }
 
     export async function transferFile(

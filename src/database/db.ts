@@ -205,6 +205,9 @@ export namespace MongoDbTypes {
         uuid: string;
         duration: number;
         errorServers?: string[];
+        // Clear, classified reason when status === "failed" (e.g. SSH connect
+        // refused, command timeout, or watchdog-detected stuck-pending).
+        errorMessage?: string;
     }
 
     export enum ServiceType {
@@ -235,6 +238,13 @@ export namespace MongoDbTypes {
         deployStatus?: {
             liteNode?: NodeStatus;
             bobNode?: NodeStatus;
+        };
+        // Epoch-ms when each service last entered a transient state
+        // ("setting_up"/"restarting"). The stuck-deploy watchdog uses this to
+        // measure how long a deploy/restart has been pending.
+        deployStatusAt?: {
+            liteNode?: number;
+            bobNode?: number;
         };
         deployLogs?: {
             liteNode?: {

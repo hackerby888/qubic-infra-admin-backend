@@ -106,11 +106,13 @@ router.post("/command", authenticateToken, async (req, res) => {
             stderr,
             status,
             duration,
+            errorMessage,
         }: {
             stdout: string;
             stderr: string;
             status: "pending" | "completed" | "failed";
             duration: number;
+            errorMessage?: string;
         }) => {
             Mongodb.getCommandLogsCollection()
                 .updateOne(
@@ -122,6 +124,9 @@ router.post("/command", authenticateToken, async (req, res) => {
                             stdout: stdout,
                             stderr: stderr,
                             status: status,
+                            ...(errorMessage !== undefined
+                                ? { errorMessage }
+                                : {}),
                         },
                         $inc: {
                             duration: duration,
@@ -147,19 +152,25 @@ router.post("/command", authenticateToken, async (req, res) => {
             service: MongoDbTypes.ServiceType;
             status: MongoDbTypes.NodeStatus;
         }) => {
+            // Stamp the entry time whenever we move into a transient state so
+            // the stuck-deploy watchdog can tell how long it has been pending.
+            const isTransient =
+                status === "setting_up" || status === "restarting";
+            const setObj: Record<string, unknown> = {
+                deployStatus: {
+                    $mergeObjects: ["$deployStatus", { [service]: status }],
+                },
+            };
+            if (isTransient) {
+                setObj.deployStatusAt = {
+                    $mergeObjects: [
+                        "$deployStatusAt",
+                        { [service]: Date.now() },
+                    ],
+                };
+            }
             Mongodb.getServersCollection()
-                .updateOne({ server: server }, [
-                    {
-                        $set: {
-                            deployStatus: {
-                                $mergeObjects: [
-                                    "$deployStatus",
-                                    { [service]: status },
-                                ],
-                            },
-                        },
-                    },
-                ])
+                .updateOne({ server: server }, [{ $set: setObj }])
                 .then()
                 .catch(() => {});
         };
@@ -189,6 +200,7 @@ router.post("/command", authenticateToken, async (req, res) => {
                                 stderrs,
                                 isSuccess,
                                 duration,
+                                errorMessage,
                             }) => {
                                 totalCommandsExecuted++;
                                 if (isSuccess) {
@@ -214,15 +226,19 @@ router.post("/command", authenticateToken, async (req, res) => {
                                         status: "stopped",
                                     });
                                 } else {
+                                    const reason =
+                                        errorMessage ||
+                                        `Shutdown failed on ${serverObject.server}`;
                                     updateCommandLogToDb({
                                         stdout: Object.values(stdouts).join(
                                             "\n"
                                         ),
-                                        stderr: Object.values(stderrs).join(
-                                            "\n"
-                                        ),
+                                        stderr:
+                                            `⛔ ${reason}\n` +
+                                            Object.values(stderrs).join("\n"),
                                         status: "failed",
                                         duration: duration,
+                                        errorMessage: reason,
                                     });
                                     updateNodeDeployStatusToDb({
                                         server: serverObject.server,
@@ -296,6 +312,7 @@ router.post("/command", authenticateToken, async (req, res) => {
                                 stderrs,
                                 isSuccess,
                                 duration,
+                                errorMessage,
                             }) => {
                                 totalCommandsExecuted++;
                                 currentStderr +=
@@ -321,6 +338,9 @@ router.post("/command", authenticateToken, async (req, res) => {
                                         status: "active",
                                     });
                                 } else {
+                                    const reason =
+                                        errorMessage ||
+                                        `Restart failed on ${serverObject.server}`;
                                     currentStdout +=
                                         "\n" +
                                         `---------- Restart log for ${service} on ${serverObject.server} ----------- \n\n`;
@@ -328,9 +348,10 @@ router.post("/command", authenticateToken, async (req, res) => {
                                         Object.values(stdouts).join("\n");
                                     updateCommandLogToDb({
                                         stdout: currentStdout,
-                                        stderr: currentStderr,
+                                        stderr: `⛔ ${reason}\n` + currentStderr,
                                         status: "failed",
                                         duration: duration,
+                                        errorMessage: reason,
                                     });
                                     updateNodeDeployStatusToDb({
                                         server: serverObject.server,
@@ -584,6 +605,12 @@ router.post("/execute-command", authenticateToken, async (req, res) => {
                     );
                 });
         };
+        const setCommandLogErrorMessage = (errorMessage: string) => {
+            Mongodb.getCommandLogsCollection()
+                .updateOne({ uuid: currentUUID }, { $set: { errorMessage } })
+                .then()
+                .catch(() => {});
+        };
         const addErrorServersToCommandLog = async (errorServers: string[]) => {
             Mongodb.getCommandLogsCollection()
                 .updateOne(
@@ -685,13 +712,19 @@ router.post("/execute-command", authenticateToken, async (req, res) => {
                     } else {
                         haveAtleastOneError = true;
                         errorServersList.push(serverObject.server);
+                        const reason =
+                            result.errorMessage ||
+                            `Command failed on ${serverObject.server}`;
                         databaseUpdater({
                             server: serverObject.server,
                             stdout: Object.values(result.stdouts).join("\n"),
-                            stderr: Object.values(result.stderrs).join("\n"),
+                            stderr:
+                                `⛔ ${reason}\n` +
+                                Object.values(result.stderrs).join("\n"),
                             status: isAllDone ? "failed" : "pending",
                             duration: result.duration,
                         });
+                        setCommandLogErrorMessage(reason);
                     }
                     return result;
                 })

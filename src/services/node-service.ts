@@ -1524,6 +1524,207 @@ namespace NodeService {
         }
     }
 
+    // ── Stuck-state recovery ────────────────────────────────────────────────
+    // command_logs / deployStatus only leave "pending"/transient when the SSH
+    // promise resolves. A backend restart mid-op, or a worker that never
+    // resolves, would otherwise leave them stuck forever. These guards detect
+    // that and fail loudly so "something is wrong" is visible, not silent.
+
+    const STALE_COMMAND_MS = 6 * 60 * 1000; // > max 3-min SSH timeout + buffer
+    const STUCK_DEPLOY_MS = 6 * 60 * 1000;
+    const STUCK_WATCH_INTERVAL_MS = 60_000;
+    const TRANSIENT_DEPLOY_STATES = ["setting_up", "restarting"];
+
+    // Run once at boot: anything still "pending"/transient can only be a
+    // leftover from a previous process (in-flight ops don't survive a restart).
+    async function reconcileStaleStatesOnBoot() {
+        try {
+            const res = await Mongodb.getCommandLogsCollection().updateMany(
+                { status: "pending" },
+                [
+                    {
+                        $set: {
+                            status: "failed",
+                            errorMessage:
+                                "Backend restarted while this command was still pending — marked failed (result unknown).",
+                            stderr: {
+                                $concat: [
+                                    { $ifNull: ["$stderr", ""] },
+                                    "\n⛔ Backend restarted mid-command; result unknown.\n",
+                                ],
+                            },
+                        },
+                    },
+                ]
+            );
+            if (res.modifiedCount > 0) {
+                logger.warn(
+                    `⛔ Boot reconcile: marked ${res.modifiedCount} stuck 'pending' command log(s) as failed.`
+                );
+            }
+
+            const stuckServers = await Mongodb.getServersCollection()
+                .find({
+                    $or: [
+                        {
+                            "deployStatus.liteNode": {
+                                $in: TRANSIENT_DEPLOY_STATES,
+                            },
+                        },
+                        {
+                            "deployStatus.bobNode": {
+                                $in: TRANSIENT_DEPLOY_STATES,
+                            },
+                        },
+                    ],
+                } as any)
+                .toArray();
+            for (const s of stuckServers) {
+                const set: Record<string, unknown> = {};
+                if (
+                    s.deployStatus?.liteNode &&
+                    TRANSIENT_DEPLOY_STATES.includes(s.deployStatus.liteNode)
+                ) {
+                    set["deployStatus.liteNode"] = "error";
+                }
+                if (
+                    s.deployStatus?.bobNode &&
+                    TRANSIENT_DEPLOY_STATES.includes(s.deployStatus.bobNode)
+                ) {
+                    set["deployStatus.bobNode"] = "error";
+                }
+                if (Object.keys(set).length > 0) {
+                    await Mongodb.getServersCollection().updateOne(
+                        { server: s.server },
+                        { $set: set as any }
+                    );
+                    logger.warn(
+                        `⛔ Boot reconcile: reset stale deployStatus on ${
+                            s.server
+                        } -> error (${Object.keys(set).join(", ")}).`
+                    );
+                }
+            }
+        } catch (error) {
+            logger.error(
+                `Error in reconcileStaleStatesOnBoot: ${
+                    (error as Error).message
+                }`
+            );
+        }
+    }
+
+    // Periodic: command logs stuck in "pending" past STALE_COMMAND_MS (longer
+    // than any per-op SSH timeout) mean the worker never resolved. Fail loudly.
+    async function watchStalePendingCommands() {
+        while (true) {
+            try {
+                const cutoff = Date.now() - STALE_COMMAND_MS;
+                const stale = await Mongodb.getCommandLogsCollection()
+                    .find({ status: "pending", timestamp: { $lt: cutoff } })
+                    .toArray();
+                for (const log of stale) {
+                    const ageMin = Math.round(
+                        (Date.now() - log.timestamp) / 60000
+                    );
+                    const reason = `Stuck in pending for ${ageMin} minute(s) — watchdog marked it failed (remote command hung or the worker was lost).`;
+                    logger.error(
+                        `⛔ STUCK COMMAND: "${log.command}" (uuid ${log.uuid}) by ${log.operator}: ${reason}`
+                    );
+                    await Mongodb.getCommandLogsCollection().updateOne(
+                        { uuid: log.uuid, status: "pending" },
+                        [
+                            {
+                                $set: {
+                                    status: "failed",
+                                    errorMessage: reason,
+                                    stderr: {
+                                        $concat: [
+                                            { $ifNull: ["$stderr", ""] },
+                                            `\n⛔ ${reason}\n`,
+                                        ],
+                                    },
+                                },
+                            },
+                        ]
+                    );
+                }
+            } catch (error) {
+                logger.error(
+                    `Error in watchStalePendingCommands: ${
+                        (error as Error).message
+                    }`
+                );
+            }
+            await sleep(STUCK_WATCH_INTERVAL_MS);
+        }
+    }
+
+    // Periodic: deploy/restart stuck in a transient state past STUCK_DEPLOY_MS.
+    // Uses deployStatusAt (entry timestamp); rows without it are skipped here
+    // (boot reconcile already covers process restarts).
+    async function watchStuckDeploys() {
+        while (true) {
+            try {
+                const cutoff = Date.now() - STUCK_DEPLOY_MS;
+                const servers = await Mongodb.getServersCollection()
+                    .find({
+                        $or: [
+                            {
+                                "deployStatus.liteNode": {
+                                    $in: TRANSIENT_DEPLOY_STATES,
+                                },
+                            },
+                            {
+                                "deployStatus.bobNode": {
+                                    $in: TRANSIENT_DEPLOY_STATES,
+                                },
+                            },
+                        ],
+                    } as any)
+                    .toArray();
+                for (const s of servers) {
+                    for (const svc of ["liteNode", "bobNode"] as const) {
+                        const st = s.deployStatus?.[svc];
+                        if (!st || !TRANSIENT_DEPLOY_STATES.includes(st))
+                            continue;
+                        const since = s.deployStatusAt?.[svc] || 0;
+                        if (!since || since > cutoff) continue;
+                        const ageMin = Math.round((Date.now() - since) / 60000);
+                        const reason = `${svc} stuck in "${st}" for ${ageMin} minute(s) — watchdog marked it error (deploy/restart hung).`;
+                        logger.error(`⛔ STUCK DEPLOY @ ${s.server}: ${reason}`);
+                        await Mongodb.getServersCollection().updateOne(
+                            { server: s.server },
+                            [
+                                {
+                                    $set: {
+                                        [`deployStatus.${svc}`]: "error",
+                                        [`deployLogs.${svc}.stderr`]: {
+                                            $concat: [
+                                                {
+                                                    $ifNull: [
+                                                        `$deployLogs.${svc}.stderr`,
+                                                        "",
+                                                    ],
+                                                },
+                                                `\n⛔ ${reason}\n`,
+                                            ],
+                                        },
+                                    },
+                                },
+                            ]
+                        );
+                    }
+                }
+            } catch (error) {
+                logger.error(
+                    `Error in watchStuckDeploys: ${(error as Error).message}`
+                );
+            }
+            await sleep(STUCK_WATCH_INTERVAL_MS);
+        }
+    }
+
     export async function start() {
         if (IS_NO_DB) {
             await loadNoDbSeed();
@@ -1538,6 +1739,9 @@ namespace NodeService {
             watchMainNode();
             watchAndPromoteMain();
             watchTtydConsoles();
+            reconcileStaleStatesOnBoot();
+            watchStalePendingCommands();
+            watchStuckDeploys();
         } else {
             watchAndEvictNoDbPeers();
             logger.info(

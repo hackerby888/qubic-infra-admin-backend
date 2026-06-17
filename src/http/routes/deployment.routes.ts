@@ -31,6 +31,9 @@ router.post("/deploy", authenticateToken, async (req, res) => {
     let servers: string[] = req.body.servers;
     let service: MongoDbTypes.ServiceType = req.body.service;
     let tag: string = req.body.tag;
+    // Optional specific binary asset of the release (e.g. avx2/avx512/arm).
+    // Falls back to the default binary name when omitted.
+    let binaryName: string | undefined = req.body.binaryName;
     let operator: string | undefined = req.user?.username;
     let extraData: {
         epochFile?: string;
@@ -71,9 +74,25 @@ router.post("/deploy", authenticateToken, async (req, res) => {
                 throw new Error("Tag not found in GitHub releases");
             }
         } else {
+            let chosenBinary =
+                binaryFileMap[service as keyof typeof binaryFileMap];
+            if (binaryName) {
+                // Only honor a caller-supplied binary if it is a real asset of
+                // this release (prevents arbitrary download-path injection).
+                let tagObj = GithubService.getGithubTags(service)?.find(
+                    (t) => t.name.trim() === tag.trim()
+                );
+                let assets = tagObj?.assets || [];
+                if (!assets.some((a) => a.name === binaryName)) {
+                    throw new Error(
+                        "Selected binary is not a valid asset of this release"
+                    );
+                }
+                chosenBinary = binaryName;
+            }
             binaryUrl = GithubService.getDownloadUrlForTag(
                 tag,
-                binaryFileMap[service as keyof typeof binaryFileMap],
+                chosenBinary,
                 service
             );
         }
@@ -81,6 +100,7 @@ router.post("/deploy", authenticateToken, async (req, res) => {
         res.status(400).json({
             error: (error as Error).message,
         });
+        return;
     }
     // Validate input
     if (!servers || !Array.isArray(servers) || servers.length === 0) {

@@ -2,6 +2,13 @@ import { MongoDbTypes } from "../database/db.js";
 import { logger } from "../utils/logger.js";
 
 namespace GithubService {
+    export interface GithubAsset {
+        name: string;
+        browser_download_url: string;
+        size: number;
+        content_type: string;
+    }
+
     export interface GithubTag {
         name: string;
         zipball_url: string;
@@ -11,6 +18,9 @@ namespace GithubService {
             url: string;
         };
         node_id: string;
+        // Downloadable binary assets of this tag's release (avx2/avx512/arm/...),
+        // filtered to runnable binaries. Empty if the tag has no release.
+        assets?: GithubAsset[];
     }
 
     const GITHUB_API_URL = "https://api.github.com";
@@ -127,6 +137,44 @@ namespace GithubService {
     //     }
     // }
 
+    function githubHeaders(): Record<string, string> {
+        let headers: Record<string, string> = {
+            Accept: "application/vnd.github+json",
+        };
+        if (_github_token) {
+            headers.Authorization = `Bearer ${_github_token}`;
+        }
+        return headers;
+    }
+
+    // Non-binary release assets GitHub (or the build) attaches alongside the
+    // actual binaries: checksums, signatures, sboms, notes. Source archives are
+    // already excluded by GitHub from a release's `assets`.
+    const NON_BINARY_ASSET_EXT = [
+        ".sha256",
+        ".sha512",
+        ".sha1",
+        ".md5",
+        ".sig",
+        ".asc",
+        ".pem",
+        ".txt",
+        ".json",
+        ".yml",
+        ".yaml",
+        ".sbom",
+        ".pdf",
+    ];
+    function filterBinaryAssets(assets: GithubAsset[]): GithubAsset[] {
+        return assets.filter((a) => {
+            let name = (a.name || "").toLowerCase();
+            if (name.includes("checksum") || name.includes("source")) {
+                return false;
+            }
+            return !NON_BINARY_ASSET_EXT.some((ext) => name.endsWith(ext));
+        });
+    }
+
     export async function pullTagsFromGithub(
         service: MongoDbTypes.ServiceType
     ): Promise<GithubTag[]> {
@@ -142,22 +190,56 @@ namespace GithubService {
             return _tags[service] || [];
         }
         isPullingTags = true;
-        let url = ``;
+        let repoBase = ``;
         if (service === MongoDbTypes.ServiceType.LiteNode) {
-            url = `${GITHUB_API_URL}/repos/${_lite_node_user}/${_lite_node_repo}/tags`;
+            repoBase = `${GITHUB_API_URL}/repos/${_lite_node_user}/${_lite_node_repo}`;
         } else if (service === MongoDbTypes.ServiceType.BobNode) {
-            url = `${GITHUB_API_URL}/repos/${_bob_node_user}/${_bob_node_repo}/tags`;
+            repoBase = `${GITHUB_API_URL}/repos/${_bob_node_user}/${_bob_node_repo}`;
         } else {
             logger.error("Invalid service type for pulling GitHub tags.");
             isPullingTags = false;
             return [];
         }
         try {
-            let response = await fetch(url);
+            let response = await fetch(`${repoBase}/tags`, {
+                headers: githubHeaders(),
+            });
             if (!response.ok) {
                 throw new Error(`Failed to fetch tags: ${response.statusText}`);
             }
             let data: GithubTag[] = await response.json();
+
+            // Enrich each tag with its release's binary assets so the deploy UI
+            // can pick a specific build. Best-effort: on failure assets stay
+            // empty and deploy falls back to the default binary name.
+            try {
+                let releasesRes = await fetch(
+                    `${repoBase}/releases?per_page=100`,
+                    { headers: githubHeaders() }
+                );
+                if (releasesRes.ok) {
+                    let releases: {
+                        tag_name: string;
+                        assets: GithubAsset[];
+                    }[] = await releasesRes.json();
+                    let assetsByTag: Record<string, GithubAsset[]> = {};
+                    for (let release of releases) {
+                        assetsByTag[release.tag_name] = filterBinaryAssets(
+                            release.assets || []
+                        );
+                    }
+                    for (let tag of data) {
+                        tag.assets = assetsByTag[tag.name] || [];
+                    }
+                }
+            } catch (assetError) {
+                logger.warn(
+                    `Failed to fetch release assets: ${
+                        (assetError as Error).message
+                    }`
+                );
+            }
+
             _tags[service] = data;
             logger.info("Fetched GitHub tags successfully.");
             isPullingTags = false;

@@ -138,13 +138,12 @@ namespace GithubService {
     // }
 
     function githubHeaders(): Record<string, string> {
-        let headers: Record<string, string> = {
+        // Public repos: do NOT attach Authorization. An invalid/expired
+        // GITHUB_TOKEN here makes GitHub 401 the request and we lose the entire
+        // tag list (these endpoints work fine unauthenticated).
+        return {
             Accept: "application/vnd.github+json",
         };
-        if (_github_token) {
-            headers.Authorization = `Bearer ${_github_token}`;
-        }
-        return headers;
     }
 
     // Non-binary release assets GitHub (or the build) attaches alongside the
@@ -164,6 +163,7 @@ namespace GithubService {
         ".yaml",
         ".sbom",
         ".pdf",
+        ".exe", // Windows build; the fleet is Linux
     ];
     function filterBinaryAssets(assets: GithubAsset[]): GithubAsset[] {
         return assets.filter((a) => {

@@ -698,11 +698,7 @@ namespace NodeService {
                 _serverToOperatorMap[node.server] = node.operator || "unknown";
             }
 
-            let serversIpInfo: MongoDbTypes.ServerIpInfo[] =
-                await Mongodb.getServerIpInfoCollection().find({}).toArray();
-            serversIpInfo.forEach((doc) => {
-                _ipInfoCache[doc.server] = doc.ipInfo;
-            });
+            await refreshIpInfoCache();
 
             _currentLiteNodes = liteServers
                 .map((node) => ({ ...node }))
@@ -759,6 +755,36 @@ namespace NodeService {
                 `Pulled ${liteServers.length} Lite Nodes and ${bobServers.length} Bob Nodes from database`
             );
         } catch (error) {}
+    }
+
+    // Loads geolocation (country/city/coords) for every server from the
+    // server_ip_info collection into _ipInfoCache.
+    async function refreshIpInfoCache() {
+        let serversIpInfo: MongoDbTypes.ServerIpInfo[] =
+            await Mongodb.getServerIpInfoCollection().find({}).toArray();
+        serversIpInfo.forEach((doc) => {
+            _ipInfoCache[doc.server] = doc.ipInfo;
+        });
+    }
+
+    // pullServerLists only refreshes _ipInfoCache when a server is added/edited,
+    // but IP geolocation is resolved asynchronously and lands in the DB seconds
+    // later. Without this loop, freshly added machines keep an empty ipInfo in
+    // the in-memory status (my-nodes shows no country) until the next restart.
+    const IP_INFO_REFRESH_INTERVAL_MS = 60_000;
+    async function watchAndRefreshIpInfoCache() {
+        while (true) {
+            await sleep(IP_INFO_REFRESH_INTERVAL_MS);
+            try {
+                await refreshIpInfoCache();
+            } catch (error) {
+                logger.error(
+                    `Error refreshing IP info cache: ${
+                        (error as Error).message
+                    }`
+                );
+            }
+        }
     }
 
     export async function refreshBlacklistedPeers() {
@@ -1739,6 +1765,7 @@ namespace NodeService {
             watchMainNode();
             watchAndPromoteMain();
             watchTtydConsoles();
+            watchAndRefreshIpInfoCache();
             reconcileStaleStatesOnBoot();
             watchStalePendingCommands();
             watchStuckDeploys();

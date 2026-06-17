@@ -284,6 +284,13 @@ export namespace MongoDbTypes {
         operator: string; // admin username who added it (audit)
         createdAt: number;
     }
+
+    // Generic single-value app settings, keyed by `key`. Used for fleet-wide
+    // config like the global lite-node custom parameter.
+    export interface Setting {
+        key: string;
+        value: string;
+    }
 }
 
 export namespace Mongodb {
@@ -394,6 +401,10 @@ export namespace Mongodb {
 
     export function getCommandLogsCollection() {
         return getDB().collection<MongoDbTypes.CommandLog>("command_logs");
+    }
+
+    export function getSettingsCollection() {
+        return getDB().collection<MongoDbTypes.Setting>("settings");
     }
 
     export async function addLiteNode(node: MongoDbTypes.LiteNode) {

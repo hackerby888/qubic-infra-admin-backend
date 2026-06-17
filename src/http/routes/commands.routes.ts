@@ -6,6 +6,10 @@ import { authenticateToken } from "../middleware/auth.middleware.js";
 import { SSHService } from "../../services/ssh-service.js";
 import { v4 as uuidv4 } from "uuid";
 import { millisToSeconds } from "../../utils/time.js";
+import {
+    getGlobalLiteCustomParameter,
+    mergeCustomParameter,
+} from "../../utils/custom-parameter.js";
 
 const TTYD_PORT = 7681;
 const TTYD_URL =
@@ -270,7 +274,9 @@ router.post("/command", authenticateToken, async (req, res) => {
             // time; now it picks up parameter changes too (same as a redeploy).
             // Bob nodes have no custom parameter.
             let liteParamMap: Record<string, string> = {};
+            let globalLiteParam = "";
             if (services.includes(MongoDbTypes.ServiceType.LiteNode)) {
+                globalLiteParam = await getGlobalLiteCustomParameter();
                 let liteDocs = await Mongodb.getLiteNodeCollection()
                     .find({
                         server: { $in: serverDocs.map((s) => s.server) },
@@ -302,7 +308,11 @@ router.post("/command", authenticateToken, async (req, res) => {
                             customParameter:
                                 service ===
                                 MongoDbTypes.ServiceType.LiteNode
-                                    ? liteParamMap[serverObject.server] ?? ""
+                                    ? mergeCustomParameter(
+                                          globalLiteParam,
+                                          liteParamMap[serverObject.server] ??
+                                              ""
+                                      )
                                     : undefined,
                         }
                     )

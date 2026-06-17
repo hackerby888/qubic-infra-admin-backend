@@ -6,6 +6,11 @@ import { logger } from "../../utils/logger.js";
 import { authenticateToken } from "../middleware/auth.middleware.js";
 import jwt from "jsonwebtoken";
 import { hashSHA256 } from "../../utils/crypto.js";
+import {
+    getGlobalLiteCustomParameter,
+    setGlobalLiteCustomParameter,
+    mergeCustomParameter,
+} from "../../utils/custom-parameter.js";
 
 const router = express.Router();
 
@@ -177,7 +182,13 @@ router.get("/lite-node-custom-parameter", authenticateToken, async (req, res) =>
             return;
         }
         let doc = await Mongodb.getLiteNodeCollection().findOne({ server });
-        res.json({ customParameter: doc?.customParameter || "" });
+        let global = await getGlobalLiteCustomParameter();
+        let machine = doc?.customParameter || "";
+        res.json({
+            customParameter: machine,
+            global,
+            effective: mergeCustomParameter(global, machine),
+        });
     } catch (error) {
         logger.error(
             `Error getting custom parameter: ${(error as Error).message}`
@@ -186,10 +197,9 @@ router.get("/lite-node-custom-parameter", authenticateToken, async (req, res) =>
     }
 });
 
-// Current custom parameter across every lite node owned by the operator
-// (admin = all). Used to prefill the bulk dialog. `uniform` is true when all
-// nodes share one value (then `value` holds it); when they differ, `value` is
-// "" and the caller can show a "mixed" hint.
+// Fleet-wide global lite-node custom parameter, used to prefill the bulk
+// dialog. `value` is the stored global; `uniform` is always true (single
+// canonical value). `total` is the node count in scope for messaging.
 router.get(
     "/all-lite-nodes-custom-parameter",
     authenticateToken,
@@ -204,21 +214,14 @@ router.get(
                 .toArray();
             let serverNames = serverDocs.map((doc) => doc.server);
 
-            let liteDocs = await Mongodb.getLiteNodeCollection()
-                .find({ server: { $in: serverNames } })
-                .toArray();
-            let valueBy: Record<string, string> = {};
-            for (let doc of liteDocs) {
-                valueBy[doc.server] = doc.customParameter || "";
-            }
-            // Treat nodes with no lite doc as empty string.
-            let values = serverNames.map((name) => valueBy[name] ?? "");
-            let distinct = Array.from(new Set(values));
-            let uniform = distinct.length <= 1;
+            // The bulk dialog edits the fleet-wide global parameter (merged with
+            // each node's per-machine value at apply time), so there is a single
+            // canonical value to prefill — always uniform.
+            let global = await getGlobalLiteCustomParameter();
 
             res.json({
-                value: uniform ? distinct[0] ?? "" : "",
-                uniform,
+                value: global,
+                uniform: true,
                 total: serverNames.length,
             });
         } catch (error) {
@@ -267,10 +270,14 @@ router.post(
                 { upsert: true }
             );
 
-            // Write custom_parameter.txt on the node now so the value is on disk
+            // The DB stores only this machine's value; the on-disk file holds
+            // the merged (global + machine) string the node actually starts
+            // with. Write custom_parameter.txt now so the value is on disk
             // immediately (picked up on the next restart/redeploy). DB write is
             // authoritative; an SSH failure (e.g. node not yet deployed) is
             // non-fatal and only reported in the response.
+            let global = await getGlobalLiteCustomParameter();
+            let merged = mergeCustomParameter(global, customParameter);
             let written = false;
             try {
                 let result = await SSHService.writeLiteNodeCustomParameter(
@@ -278,7 +285,7 @@ router.post(
                     serverDoc.username,
                     serverDoc.password,
                     serverDoc.sshPrivateKey,
-                    customParameter
+                    merged
                 );
                 written = result.isSuccess;
             } catch (sshError) {
@@ -304,10 +311,12 @@ router.post(
     }
 );
 
-// Apply one custom parameter to every lite node owned by the operator
-// (admin = all lite nodes). Nodes whose stored value already equals the
-// target are left untouched (no-op). DB write only — takes effect on each
-// node's next deploy/restart, same as the per-machine endpoint.
+// Set the fleet-wide GLOBAL lite-node custom parameter. This does NOT touch
+// any node's per-machine value — the two are merged (global + machine) at
+// apply time. After storing the global we re-write custom_parameter.txt on the
+// caller's in-scope nodes (admin = all) with the merged value so it lands on
+// disk; it takes effect on each node's next restart/redeploy. SSH failures
+// (e.g. node not deployed yet) are non-fatal and counted as skipped.
 router.post(
     "/set-all-lite-nodes-custom-parameter",
     authenticateToken,
@@ -322,6 +331,9 @@ router.post(
                 return;
             }
 
+            // Store the global value (system-wide single setting).
+            await setGlobalLiteCustomParameter(customParameter);
+
             let serverDocs = await Mongodb.getServersCollection()
                 .find({
                     services: MongoDbTypes.ServiceType.LiteNode,
@@ -332,7 +344,7 @@ router.post(
 
             if (serverNames.length === 0) {
                 res.json({
-                    message: "No lite nodes found",
+                    message: "Global custom parameter saved (no lite nodes to apply to)",
                     total: 0,
                     updated: 0,
                     skipped: 0,
@@ -340,36 +352,49 @@ router.post(
                 return;
             }
 
-            // Figure out which nodes already hold the target value (no-op)
-            // vs. which need writing.
+            // Each node's per-machine value, to merge with the new global.
             let liteDocs = await Mongodb.getLiteNodeCollection()
                 .find({ server: { $in: serverNames } })
                 .toArray();
-            let existing: Record<string, string> = {};
+            let machineBy: Record<string, string> = {};
             for (let doc of liteDocs) {
-                existing[doc.server] = doc.customParameter || "";
+                machineBy[doc.server] = doc.customParameter || "";
             }
-            let serversToUpdate = serverNames.filter(
-                (server) => (existing[server] ?? "") !== customParameter
+
+            // Write the merged value to each node's custom_parameter.txt.
+            let writtenCount = 0;
+            await Promise.all(
+                serverDocs.map(async (serverDoc) => {
+                    if (!serverDoc.username) return;
+                    let merged = mergeCustomParameter(
+                        customParameter,
+                        machineBy[serverDoc.server] ?? ""
+                    );
+                    try {
+                        let result =
+                            await SSHService.writeLiteNodeCustomParameter(
+                                serverDoc.server,
+                                serverDoc.username,
+                                serverDoc.password,
+                                serverDoc.sshPrivateKey,
+                                merged
+                            );
+                        if (result.isSuccess) writtenCount++;
+                    } catch (sshError) {
+                        logger.warn(
+                            `Saved global custom parameter but failed to write custom_parameter.txt on ${serverDoc.server}: ${
+                                (sshError as Error).message
+                            }`
+                        );
+                    }
+                })
             );
 
-            if (serversToUpdate.length > 0) {
-                await Mongodb.getLiteNodeCollection().bulkWrite(
-                    serversToUpdate.map((server) => ({
-                        updateOne: {
-                            filter: { server },
-                            update: { $set: { customParameter } },
-                            upsert: true,
-                        },
-                    }))
-                );
-            }
-
             res.json({
-                message: "Custom parameter applied to all lite nodes",
+                message: "Global custom parameter saved and applied",
                 total: serverNames.length,
-                updated: serversToUpdate.length,
-                skipped: serverNames.length - serversToUpdate.length,
+                updated: writtenCount,
+                skipped: serverNames.length - writtenCount,
             });
         } catch (error) {
             logger.error(

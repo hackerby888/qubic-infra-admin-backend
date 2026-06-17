@@ -8,6 +8,10 @@ import { SSHService } from "../../services/ssh-service.js";
 import { checkLink } from "../../utils/common.js";
 import { millisToSeconds } from "../../utils/time.js";
 import { calcGroupIdFromIds } from "../../utils/node.js";
+import {
+    getGlobalLiteCustomParameter,
+    mergeCustomParameter,
+} from "../../utils/custom-parameter.js";
 
 const router = express.Router();
 
@@ -286,6 +290,8 @@ router.post("/deploy", authenticateToken, async (req, res) => {
     for (let doc of liteNodeDocs) {
         customParameterMap[doc.server] = doc.customParameter || "";
     }
+    // Fleet-wide global param, merged with each node's per-machine value below.
+    let globalLiteParam = await getGlobalLiteCustomParameter();
 
     // Deploy to each server
     try {
@@ -316,7 +322,10 @@ router.post("/deploy", authenticateToken, async (req, res) => {
                     keydbConfig: extraData.keydbConfig || [],
                     kvrocksConfig: extraData.kvrocksConfig || [],
                     keepOldConfig: extraData.keepOldConfig || false,
-                    customParameter: customParameterMap[server.server] ?? "",
+                    customParameter: mergeCustomParameter(
+                        globalLiteParam,
+                        customParameterMap[server.server] ?? ""
+                    ),
                 }
             )
                 .then((result) => {

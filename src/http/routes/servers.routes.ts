@@ -523,6 +523,274 @@ router.post("/delete-server", authenticateToken, async (req, res) => {
     }
 });
 
+// Remove a single service (lite/bob) from a server without deleting the server.
+// Stops the running node on the host (best-effort), drops the service + its
+// per-service deploy state, deletes the lighter polling record, and refreshes
+// NodeService so realtime tracking for that service stops.
+router.post("/remove-server-service", authenticateToken, async (req, res) => {
+    try {
+        let operator = req.user?.username;
+        let { server, service } = req.body as {
+            server: string;
+            service: MongoDbTypes.ServiceType;
+        };
+        if (!operator) {
+            res.status(400).json({ error: "No operator found" });
+            return;
+        }
+        if (!server || !service) {
+            res.status(400).json({ error: "Missing 'server' or 'service'" });
+            return;
+        }
+        if (
+            service !== MongoDbTypes.ServiceType.LiteNode &&
+            service !== MongoDbTypes.ServiceType.BobNode
+        ) {
+            res.status(400).json({ error: "Invalid service" });
+            return;
+        }
+
+        // Resolve the server, scoped to the operator (admin = all).
+        let serverDoc = await Mongodb.getServersCollection().findOne({
+            server,
+            operator: mongodbOperatorSelection(operator),
+        });
+        if (!serverDoc) {
+            res.status(404).json({ error: "Server not found" });
+            return;
+        }
+        if (!serverDoc.services?.includes(service)) {
+            res.status(400).json({
+                error: "Server does not run this service",
+            });
+            return;
+        }
+
+        // DB first so the user gets a fast, authoritative confirm. Drop the
+        // service + its per-service deploy state from the server doc.
+        await Mongodb.getServersCollection().updateOne(
+            { server },
+            {
+                $pull: { services: service },
+                $unset: {
+                    [`deployStatus.${service}`]: "",
+                    [`deployStatusAt.${service}`]: "",
+                    [`deployLogs.${service}`]: "",
+                },
+            } as any
+        );
+
+        // Remove the lighter polling record so realtime tracking stops.
+        if (service === MongoDbTypes.ServiceType.LiteNode) {
+            await Mongodb.getLiteNodeCollection().deleteOne({ server });
+        } else {
+            await Mongodb.getBobNodeCollection().deleteOne({ server });
+        }
+
+        await NodeService.pullServerLists();
+        SSHService._clearSSHPortCache(server);
+
+        // Respond now — tracking stopped and DB updated. Stopping the running
+        // node on the host is SSH and can take a while (or hang on an
+        // unreachable host), so run it in the background best-effort; it must
+        // not block the user's confirm.
+        res.json({ message: "Service removed; stopping on host in background" });
+
+        if (serverDoc.username) {
+            SSHService.shutdownNode(
+                serverDoc.server,
+                serverDoc.username,
+                serverDoc.password,
+                serverDoc.sshPrivateKey,
+                service
+            )
+                .then((result) => {
+                    if (!result.isSuccess) {
+                        logger.warn(
+                            `Removed ${service} from ${server}; host stop returned failure`
+                        );
+                    }
+                })
+                .catch((sshError) => {
+                    logger.warn(
+                        `Removed ${service} from ${server} but failed to stop it on host: ${
+                            (sshError as Error).message
+                        }`
+                    );
+                });
+        }
+    } catch (error) {
+        logger.error(
+            `Error removing server service: ${(error as Error).message}`
+        );
+        res.status(500).json({
+            error: "Failed to remove service " + error,
+        });
+    }
+});
+
+// Add a service (lite/bob) back to a server. Mirrors /new-servers: registers
+// the service, then runs host setup (dependency install) in the background and
+// creates the polling record on success so realtime tracking resumes. The node
+// binary itself is deployed separately via the deploy dialog.
+router.post("/add-server-service", authenticateToken, async (req, res) => {
+    try {
+        let operator = req.user?.username;
+        let { server, service } = req.body as {
+            server: string;
+            service: MongoDbTypes.ServiceType;
+        };
+        if (!operator) {
+            res.status(400).json({ error: "No operator found" });
+            return;
+        }
+        if (!server || !service) {
+            res.status(400).json({ error: "Missing 'server' or 'service'" });
+            return;
+        }
+        if (
+            service !== MongoDbTypes.ServiceType.LiteNode &&
+            service !== MongoDbTypes.ServiceType.BobNode
+        ) {
+            res.status(400).json({ error: "Invalid service" });
+            return;
+        }
+
+        let serverDoc = await Mongodb.getServersCollection().findOne({
+            server,
+            operator: mongodbOperatorSelection(operator),
+        });
+        if (!serverDoc) {
+            res.status(404).json({ error: "Server not found" });
+            return;
+        }
+        if (serverDoc.services?.includes(service)) {
+            res.status(400).json({
+                error: "Server already runs this service",
+            });
+            return;
+        }
+
+        let createPollingDoc = async () => {
+            let doc = { server, operator: operator as string, isPrivate: false };
+            if (service === MongoDbTypes.ServiceType.LiteNode) {
+                await Mongodb.getLiteNodeCollection()
+                    .updateOne({ server }, { $set: doc }, { upsert: true })
+                    .catch(() => {});
+            } else {
+                await Mongodb.getBobNodeCollection()
+                    .updateOne({ server }, { $set: doc }, { upsert: true })
+                    .catch(() => {});
+            }
+        };
+
+        let hasCreds = Boolean(serverDoc.username);
+
+        // Register the service immediately (badge appears). Mark setting_up only
+        // when we will actually SSH the host.
+        await Mongodb.getServersCollection().updateOne(
+            { server },
+            {
+                $addToSet: { services: service },
+                ...(hasCreds ? { $set: { status: "setting_up" } } : {}),
+            } as any
+        );
+
+        // Tracking-only servers have no credentials — nothing to set up on the
+        // host, just register + start tracking.
+        if (!hasCreds) {
+            await createPollingDoc();
+            await NodeService.pullServerLists();
+            res.json({
+                message: "Service added (tracking-only, no host setup)",
+                setupStarted: false,
+            });
+            return;
+        }
+
+        // Respond now; run dependency setup on the host in the background, like
+        // /new-servers. Polling doc is created only on a successful setup.
+        res.json({
+            message: "Service added; setup running on host",
+            setupStarted: true,
+        });
+
+        SSHService.setupNode(
+            serverDoc.server,
+            serverDoc.username,
+            serverDoc.password,
+            serverDoc.sshPrivateKey
+        )
+            .then(async (result) => {
+                if (result.isSuccess) {
+                    await Mongodb.getServersCollection()
+                        .updateOne(
+                            { server },
+                            {
+                                $set: {
+                                    cpu: result.cpu,
+                                    os: result.os,
+                                    ram: result.ram,
+                                    status: "active",
+                                    setupLogs: {
+                                        stdout:
+                                            `---------- Time elapsed ${millisToSeconds(
+                                                result.duration
+                                            )} seconds ----------- \n\n` +
+                                            Object.values(result.stdouts).join(
+                                                "\n"
+                                            ),
+                                        stderr: Object.values(
+                                            result.stderrs
+                                        ).join("\n"),
+                                    },
+                                },
+                            }
+                        )
+                        .catch(() => {});
+                    await createPollingDoc();
+                    await NodeService.pullServerLists();
+                } else {
+                    await Mongodb.getServersCollection()
+                        .updateOne(
+                            { server },
+                            {
+                                $set: {
+                                    status: "error",
+                                    setupLogs: {
+                                        stdout: Object.values(
+                                            result.stdouts
+                                        ).join("\n"),
+                                        stderr: Object.values(
+                                            result.stderrs
+                                        ).join("\n"),
+                                    },
+                                },
+                            }
+                        )
+                        .catch(() => {});
+                }
+            })
+            .catch(async (error) => {
+                logger.error(
+                    `Error setting up added service ${service} on ${server}: ${
+                        (error as Error).message
+                    }`
+                );
+                await Mongodb.getServersCollection()
+                    .updateOne({ server }, { $set: { status: "error" } })
+                    .catch(() => {});
+            });
+    } catch (error) {
+        logger.error(
+            `Error adding server service: ${(error as Error).message}`
+        );
+        if (!res.headersSent) {
+            res.status(500).json({ error: "Failed to add service " + error });
+        }
+    }
+});
+
 router.post(
     "/transfer-server-ownership",
     authenticateToken,

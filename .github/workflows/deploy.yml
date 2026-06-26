@@ -1,0 +1,47 @@
+name: deploy
+
+# THE single fleet-rollout mechanism. Two ways to trigger it:
+#   1. Web UI  → backend `POST /deploy-fleet` → GitHub workflow_dispatch (this file).
+#   2. Manually → GitHub Actions "Run workflow", or `gh workflow run deploy.yml`
+#      — the fallback when the backend itself is unreachable.
+#
+# It SSHes the Swarm MANAGER (one box) and runs a rolling `docker service update`;
+# the manager then rolls every node one-at-a-time. No per-host SSH.
+#
+# Required repo secrets:
+#   SWARM_MANAGER_HOST, SWARM_MANAGER_USER, SWARM_MANAGER_SSH_KEY
+#   (optional) SWARM_MANAGER_SSH_PORT  — defaults to 22
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to roll out"
+        required: false
+        default: latest
+
+concurrency:
+  group: fleet-deploy
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rolling update on the Swarm manager
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SWARM_MANAGER_HOST }}
+          username: ${{ secrets.SWARM_MANAGER_USER }}
+          key: ${{ secrets.SWARM_MANAGER_SSH_KEY }}
+          port: ${{ secrets.SWARM_MANAGER_SSH_PORT || 22 }}
+          script: |
+            set -e
+            docker service update \
+              --image ghcr.io/${{ github.repository }}:${{ github.event.inputs.image_tag }} \
+              --with-registry-auth \
+              --update-parallelism 1 \
+              --update-delay 20s \
+              --update-order start-first \
+              --update-failure-action rollback \
+              backend_backend
+            docker service ps --no-trunc backend_backend | head -20

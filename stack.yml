@@ -1,0 +1,57 @@
+# Docker Swarm stack for the backend fleet.
+#   deploy:   set -a; . ./prod.env; set +a; docker stack deploy -c stack.yml --with-registry-auth backend
+#   update:   handled by .github/workflows/deploy.yml (triggered from the web UI or GitHub).
+version: "3.8"
+services:
+  backend:
+    image: ghcr.io/hackerby888/qubic-infra-admin-backend:latest
+    ports:
+      - target: 3000
+        published: 3000
+        mode: ingress # routing mesh: any node accepts :3000 (Cloudflare LB origin)
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      MONGO_URI: "${MONGO_URI}" # mongodb://user:pw@h1,h2,h3/db?replicaSet=rs0&authSource=admin
+      MONGO_DB_NAME: "${MONGO_DB_NAME}"
+      JWT_SECRET: "${JWT_SECRET}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+      GITHUB_LITE_NODE_USER: "${GITHUB_LITE_NODE_USER}"
+      GITHUB_LITE_NODE_REPO: "${GITHUB_LITE_NODE_REPO}"
+      GITHUB_BOB_NODE_USER: "${GITHUB_BOB_NODE_USER}"
+      GITHUB_BOB_NODE_REPO: "${GITHUB_BOB_NODE_REPO}"
+      GMAIL_USER: "${GMAIL_USER}"
+      GMAIL_APP_PASSWORD: "${GMAIL_APP_PASSWORD}"
+      ALERT_EMAIL_RECIPIENTS: "${ALERT_EMAIL_RECIPIENTS}"
+      # Web-UI deploy trigger (admin "Deploy" button → GitHub workflow_dispatch):
+      DEPLOY_REPO: "${DEPLOY_REPO}" # e.g. hackerby888/qubic-infra-admin-backend
+      DEPLOY_WORKFLOW: "${DEPLOY_WORKFLOW:-deploy.yml}"
+      DEPLOY_REF: "${DEPLOY_REF:-main}"
+      DEPLOY_GITHUB_TOKEN: "${DEPLOY_GITHUB_TOKEN}" # PAT with actions:write on DEPLOY_REPO
+    deploy:
+      replicas: 3
+      placement:
+        max_replicas_per_node: 1 # one backend instance per VM
+      update_config:
+        parallelism: 1 # roll ONE replica at a time
+        delay: 20s
+        order: start-first # new replica healthy BEFORE old stops → zero downtime
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: start-first
+      restart_policy:
+        condition: any
+        delay: 5s
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

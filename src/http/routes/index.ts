@@ -13,6 +13,7 @@ import mapRoutes from "./map.routes.js";
 import crashReportRoutes from "./crashreport.routes.js";
 import blacklistRoutes from "./blacklist.routes.js";
 import clusterRoutes from "./cluster.routes.js";
+import deployFleetRoutes from "./deploy-fleet.routes.js";
 
 export function setupRoutes(app: express.Application) {
     // Health check
@@ -56,4 +57,7 @@ export function setupRoutes(app: express.Application) {
 
     // System Health (admin-only: instances + DB replica + node summary)
     app.use("/", clusterRoutes);
+
+    // Fleet deploy trigger (admin-only: dispatch deploy.yml workflow)
+    app.use("/", deployFleetRoutes);
 }

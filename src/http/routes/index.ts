@@ -12,6 +12,7 @@ import automationRoutes from "./automation.routes.js";
 import mapRoutes from "./map.routes.js";
 import crashReportRoutes from "./crashreport.routes.js";
 import blacklistRoutes from "./blacklist.routes.js";
+import clusterRoutes from "./cluster.routes.js";
 
 export function setupRoutes(app: express.Application) {
     // Health check
@@ -52,4 +53,7 @@ export function setupRoutes(app: express.Application) {
 
     // Blacklisted peers (admin-only management; filters /random-peers)
     app.use("/", blacklistRoutes);
+
+    // System Health (admin-only: instances + DB replica + node summary)
+    app.use("/", clusterRoutes);
 }

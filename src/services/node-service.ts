@@ -8,6 +8,7 @@ import { calcGroupIdFromIds } from "../utils/node.js";
 import { sleep } from "../utils/time.js";
 import { Checkin } from "./logic/checkin.js";
 import { SSHService } from "./ssh-service.js";
+import { LeaderService } from "./leader-service.js";
 import * as geolib from "geolib";
 import { isIPv4 } from "net";
 import fs from "fs/promises";
@@ -383,6 +384,10 @@ namespace NodeService {
     async function watchAndRefreshGroupIds() {
         const REFRESH_INTERVAL_MS = 10_000;
         while (true) {
+            if (!LeaderService.isLeader()) {
+                await sleep(REFRESH_INTERVAL_MS);
+                continue;
+            }
             try {
                 const nodes = [..._currentLiteNodes]; // system nodes only
                 await Promise.all(
@@ -471,6 +476,12 @@ namespace NodeService {
 
         const systemNodesProcessor = async () => {
             while (true) {
+                // Only the leader polls nodes; non-leaders fill _status from the
+                // Mongo snapshot (watchRealtimeSnapshot).
+                if (!LeaderService.isLeader()) {
+                    await sleep(IDLE_TIME);
+                    continue;
+                }
                 let servers: MongoDbTypes.LiteNode[] = [..._currentLiteNodes];
                 // Check removed node and delete them from status object
                 if (
@@ -500,6 +511,10 @@ namespace NodeService {
 
         const checkinNodesProcessor = async () => {
             while (true) {
+                if (!LeaderService.isLeader()) {
+                    await sleep(IDLE_TIME);
+                    continue;
+                }
                 let liteNodesFromCheckins: { ip: string }[];
                 if (IS_NO_DB) {
                     liteNodesFromCheckins = noDbAllPeers("lite").map((ip) => ({
@@ -582,6 +597,10 @@ namespace NodeService {
 
         const systemNodesProcessor = async () => {
             while (true) {
+                if (!LeaderService.isLeader()) {
+                    await sleep(IDLE_TIME);
+                    continue;
+                }
                 let servers: MongoDbTypes.BobNode[] = [..._currentBobNodes];
                 // Check removed node and delete them from status object
                 if (
@@ -609,6 +628,10 @@ namespace NodeService {
 
         const checkinNodesProcessor = async () => {
             while (true) {
+                if (!LeaderService.isLeader()) {
+                    await sleep(IDLE_TIME);
+                    continue;
+                }
                 let bobNodesFromCheckins: { ip: string }[];
                 if (IS_NO_DB) {
                     bobNodesFromCheckins = noDbAllPeers("bob").map((ip) => ({
@@ -711,8 +734,8 @@ namespace NodeService {
                         MongoDbTypes.ServiceType.LiteNode
                     );
 
-                    if (!isLiteNode) {
-                        // remove from database if it's not a lite node
+                    if (!isLiteNode && LeaderService.isLeader()) {
+                        // Leader-only prune of stale docs (avoids N× deletes).
                         Mongodb.getLiteNodeCollection()
                             .deleteOne({ server: node.server })
                             .then(() => {
@@ -736,8 +759,8 @@ namespace NodeService {
                         MongoDbTypes.ServiceType.BobNode
                     );
 
-                    if (!isBobNode) {
-                        // remove from database if it's not a bob node
+                    if (!isBobNode && LeaderService.isLeader()) {
+                        // Leader-only prune of stale docs (avoids N× deletes).
                         Mongodb.getBobNodeCollection()
                             .deleteOne({ server: node.server })
                             .then(() => {
@@ -803,6 +826,309 @@ namespace NodeService {
 
     export function isPeerBlacklisted(ip: string) {
         return _blacklistedPeers.has(ip);
+    }
+
+    // ---- Multi-instance realtime snapshot + shared read caches ----
+
+    const SNAPSHOT_SYSTEM_INTERVAL_MS =
+        Number(process.env.SNAPSHOT_SYSTEM_INTERVAL_MS) || 1000;
+    const SNAPSHOT_CHECKIN_INTERVAL_MS =
+        Number(process.env.SNAPSHOT_CHECKIN_INTERVAL_MS) || 5000;
+    const SERVER_DATA_REFRESH_MS =
+        Number(process.env.SERVER_DATA_REFRESH_MS) || 15_000;
+
+    // Epoch-ms of the realtime data this instance currently serves. On the
+    // leader it's always "now" (live polling); on a non-leader it's the
+    // snapshot's updatedAt, so /health can surface staleness during failover.
+    let _realtimeSnapshotAt = 0;
+    export function getRealtimeSnapshotAgeMs(): number | null {
+        if (IS_NO_DB || LeaderService.isLeader()) return 0;
+        if (!_realtimeSnapshotAt) return null;
+        return Date.now() - _realtimeSnapshotAt;
+    }
+
+    // Leader publishes _status/_statusCheckin to Mongo; non-leaders read it so
+    // every instance serves identical realtime data. Regenerable → { w: 1 }.
+    async function watchRealtimeSnapshot() {
+        const writeOpts = { upsert: true, writeConcern: { w: 1 } };
+
+        const systemLoop = async () => {
+            while (true) {
+                try {
+                    if (LeaderService.isLeader()) {
+                        await Mongodb.getRealtimeStatusCollection().updateOne(
+                            { _id: "system" },
+                            {
+                                $set: {
+                                    liteServers: _status.liteServers,
+                                    bobServers: _status.bobServers,
+                                    updatedAt: Date.now(),
+                                    writerInstanceId:
+                                        LeaderService.getInstanceId(),
+                                },
+                            },
+                            writeOpts
+                        );
+                    } else {
+                        const doc =
+                            await Mongodb.getRealtimeStatusCollection().findOne({
+                                _id: "system",
+                            });
+                        if (doc) {
+                            _status.liteServers = doc.liteServers as any;
+                            _status.bobServers = doc.bobServers as any;
+                            _realtimeSnapshotAt = doc.updatedAt;
+                        }
+                    }
+                } catch (error) {
+                    logger.error(
+                        `Error in realtime system snapshot: ${
+                            (error as Error).message
+                        }`
+                    );
+                }
+                await sleep(SNAPSHOT_SYSTEM_INTERVAL_MS);
+            }
+        };
+
+        const checkinLoop = async () => {
+            while (true) {
+                try {
+                    if (LeaderService.isLeader()) {
+                        await Mongodb.getRealtimeStatusCollection().updateOne(
+                            { _id: "checkin" },
+                            {
+                                $set: {
+                                    liteServers: _statusCheckin.liteServers,
+                                    bobServers: _statusCheckin.bobServers,
+                                    updatedAt: Date.now(),
+                                    writerInstanceId:
+                                        LeaderService.getInstanceId(),
+                                },
+                            },
+                            writeOpts
+                        );
+                    } else {
+                        const doc =
+                            await Mongodb.getRealtimeStatusCollection().findOne({
+                                _id: "checkin",
+                            });
+                        if (doc) {
+                            _statusCheckin.liteServers = doc.liteServers as any;
+                            _statusCheckin.bobServers = doc.bobServers as any;
+                        }
+                    }
+                } catch (error) {
+                    logger.error(
+                        `Error in realtime checkin snapshot: ${
+                            (error as Error).message
+                        }`
+                    );
+                }
+                await sleep(SNAPSHOT_CHECKIN_INTERVAL_MS);
+            }
+        };
+
+        systemLoop();
+        checkinLoop();
+    }
+
+    // Refresh server lists + blacklist + SSH port cache on EVERY instance, so a
+    // mutation handled by one instance converges on the others (and non-leaders
+    // never SSH a stale port). Cleanup deletes inside pullServerLists are
+    // leader-gated.
+    async function watchAndRefreshServerData() {
+        while (true) {
+            await sleep(SERVER_DATA_REFRESH_MS);
+            try {
+                await pullServerLists();
+                await refreshBlacklistedPeers();
+                SSHService._clearAllSSHPortCache();
+            } catch (error) {
+                logger.error(
+                    `Error in watchAndRefreshServerData: ${
+                        (error as Error).message
+                    }`
+                );
+            }
+        }
+    }
+
+    const CLUSTER_HEARTBEAT_MS = 5_000;
+
+    // Every instance heartbeats into cluster_members (TTL-reaped) so the System
+    // Health admin view can list the whole fleet + who's leader.
+    async function watchClusterHeartbeat() {
+        while (true) {
+            try {
+                await Mongodb.getClusterMembersCollection().updateOne(
+                    { _id: LeaderService.getInstanceId() },
+                    {
+                        $set: {
+                            leader: LeaderService.isLeader(),
+                            uptimeSec: Math.round(process.uptime()),
+                            snapshotAgeMs: getRealtimeSnapshotAgeMs(),
+                            lastSeen: new Date(),
+                        },
+                    },
+                    { upsert: true, writeConcern: { w: 1 } }
+                );
+            } catch (error) {
+                logger.error(
+                    `Error in cluster heartbeat: ${(error as Error).message}`
+                );
+            }
+            await sleep(CLUSTER_HEARTBEAT_MS);
+        }
+    }
+
+    // Aggregate health of managed lite/bob hosts for the System Health view.
+    export function getClusterNodesSummary() {
+        const s = getSystemNodesStatus();
+        const net = getNetworkStatus();
+        const liteActive = s.liteNodes.filter((n) =>
+            isNodeActive(n.lastTickChanged)
+        );
+        const liteLagging = liteActive.filter(
+            (n) => n.tick !== -1 && net.tick - n.tick > 8
+        );
+        const bobActive = s.bobNodes.filter((n) =>
+            isNodeActive(n.lastTickChanged)
+        );
+        return {
+            lite: {
+                total: s.liteNodes.length,
+                active: liteActive.length,
+                lagging: liteLagging.length,
+            },
+            bob: { total: s.bobNodes.length, active: bobActive.length },
+            network: { tick: net.tick, epoch: net.epoch },
+        };
+    }
+
+    // ---- Down / recovery email alerts (managed nodes + MongoDB) ----
+
+    const NODE_DOWN_CHECK_MS = 30_000;
+    const NODE_DOWN_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
+    const _everSeenUp = new Set<string>(); // "<server>:<service>" seen active once
+    const _downNodes = new Set<string>(); // currently down (already alerted)
+    const _lastNodeDownAlertAt: Record<string, number> = {};
+
+    // Leader-only: email when a managed lite/bob node that was up goes down
+    // (unreachable / tick frozen > 2 min), and again when it recovers.
+    async function watchNodeDownAlerts() {
+        while (true) {
+            if (!LeaderService.isLeader()) {
+                await sleep(NODE_DOWN_CHECK_MS);
+                continue;
+            }
+            try {
+                const status = getSystemNodesStatus();
+                const now = Date.now();
+                const nodes = [
+                    ...status.liteNodes.map((n) => ({
+                        server: n.server,
+                        service: "liteNode",
+                        up: isNodeActive(n.lastTickChanged),
+                    })),
+                    ...status.bobNodes.map((n) => ({
+                        server: n.server,
+                        service: "bobNode",
+                        up: isNodeActive(n.lastTickChanged),
+                    })),
+                ];
+                const present = new Set(nodes.map((n) => n.server));
+
+                for (const n of nodes) {
+                    const key = `${n.server}:${n.service}`;
+                    if (n.up) {
+                        _everSeenUp.add(key);
+                        if (_downNodes.has(key)) {
+                            _downNodes.delete(key);
+                            delete _lastNodeDownAlertAt[key];
+                            logger.info(
+                                `Node ${n.server} (${n.service}) recovered`
+                            );
+                            Gmail.sendNodeRecoveredEmail({
+                                server: n.server,
+                                service: n.service,
+                            });
+                        }
+                    } else if (_everSeenUp.has(key)) {
+                        // Only alert nodes that were once up (skip never-reached).
+                        const last = _lastNodeDownAlertAt[key] || 0;
+                        if (
+                            !_downNodes.has(key) ||
+                            now - last >= NODE_DOWN_ALERT_COOLDOWN_MS
+                        ) {
+                            _downNodes.add(key);
+                            _lastNodeDownAlertAt[key] = now;
+                            logger.warn(
+                                `Node ${n.server} (${n.service}) is DOWN`
+                            );
+                            Gmail.sendNodeDownEmail({
+                                server: n.server,
+                                service: n.service,
+                            });
+                        }
+                    }
+                }
+
+                // Forget state for servers no longer tracked.
+                for (const key of Array.from(_downNodes)) {
+                    if (!present.has(key.split(":")[0] as string)) {
+                        _downNodes.delete(key);
+                        delete _lastNodeDownAlertAt[key];
+                    }
+                }
+            } catch (error) {
+                logger.error(
+                    `Error in watchNodeDownAlerts: ${(error as Error).message}`
+                );
+            }
+            await sleep(NODE_DOWN_CHECK_MS);
+        }
+    }
+
+    const DB_HEALTH_CHECK_MS = 30_000;
+    const DB_DOWN_FAIL_THRESHOLD = 2; // consecutive ping fails to declare down
+    let _dbConsecutiveFails = 0;
+    let _dbDown = false;
+    let _dbDownSince = 0;
+
+    // Runs on EVERY instance (NOT leader-gated): when Mongo is down nobody can
+    // hold the leader lease, so a leader-gated check would never fire. Each
+    // instance emails independently on its own down/recovery transition.
+    async function watchDbHealth() {
+        while (true) {
+            await sleep(DB_HEALTH_CHECK_MS);
+            try {
+                await Mongodb.getDB().command({ ping: 1 });
+                _dbConsecutiveFails = 0;
+                if (_dbDown) {
+                    _dbDown = false;
+                    const downForMs = Date.now() - _dbDownSince;
+                    logger.info(
+                        `MongoDB recovered after ${Math.round(
+                            downForMs / 1000
+                        )}s`
+                    );
+                    Gmail.sendDbRecoveredEmail({ downForMs });
+                }
+            } catch (error) {
+                _dbConsecutiveFails++;
+                logger.error(
+                    `MongoDB ping failed (${_dbConsecutiveFails}x): ${
+                        (error as Error).message
+                    }`
+                );
+                if (!_dbDown && _dbConsecutiveFails >= DB_DOWN_FAIL_THRESHOLD) {
+                    _dbDown = true;
+                    _dbDownSince = Date.now();
+                    Gmail.sendDbDownEmail({ error: (error as Error).message });
+                }
+            }
+        }
     }
 
     export function getRandomLiteNode(
@@ -1052,6 +1378,11 @@ namespace NodeService {
         let currentPendingNodes: MongoDbTypes.Server[] = [];
 
         while (true) {
+            // Leader-only: this SSHes F8 (save snapshot) to real hosts.
+            if (!LeaderService.isLeader()) {
+                await sleep(10_000);
+                continue;
+            }
             try {
                 // obtain operator cronjob to see if the save snapshot is enabled
                 let isOperatorCronJobEnabledMap: {
@@ -1152,6 +1483,11 @@ namespace NodeService {
 
     async function watchMainNode() {
         while (true) {
+            // Leader-only: sends lagging/recovered alert emails (avoid dupes).
+            if (!LeaderService.isLeader()) {
+                await sleep(30_000);
+                continue;
+            }
             try {
                 const systemNodesStatus = NodeService.getSystemNodesStatus();
                 const mainNodes = systemNodesStatus.liteNodes.filter(
@@ -1231,6 +1567,11 @@ namespace NodeService {
     // if the port is unreachable (process crashed, screen session died, OOM, etc.).
     async function watchTtydConsoles() {
         while (true) {
+            // Leader-only: SSHes to revive ttyd on real hosts.
+            if (!LeaderService.isLeader()) {
+                await sleep(TTYD_WATCHDOG_INTERVAL_MS);
+                continue;
+            }
             try {
                 const servers = (await Mongodb.getServersCollection()
                     .find({ ttyd: { $exists: true } })
@@ -1311,6 +1652,11 @@ namespace NodeService {
     // group fully up but nobody flipped), and demotes extras down to one.
     async function watchAndPromoteMain() {
         while (true) {
+            // Leader-only: sends F12 (promote/demote) over SSH to real hosts.
+            if (!LeaderService.isLeader()) {
+                await sleep(PROMOTE_WATCH_INTERVAL_MS);
+                continue;
+            }
             try {
                 // operator opt-in (cron_jobs command "auto-promote-main")
                 const operatorEnabled: Record<string, boolean> = {};
@@ -1644,6 +1990,10 @@ namespace NodeService {
     // than any per-op SSH timeout) mean the worker never resolved. Fail loudly.
     async function watchStalePendingCommands() {
         while (true) {
+            if (!LeaderService.isLeader()) {
+                await sleep(STUCK_WATCH_INTERVAL_MS);
+                continue;
+            }
             try {
                 const cutoff = Date.now() - STALE_COMMAND_MS;
                 const stale = await Mongodb.getCommandLogsCollection()
@@ -1691,6 +2041,10 @@ namespace NodeService {
     // (boot reconcile already covers process restarts).
     async function watchStuckDeploys() {
         while (true) {
+            if (!LeaderService.isLeader()) {
+                await sleep(STUCK_WATCH_INTERVAL_MS);
+                continue;
+            }
             try {
                 const cutoff = Date.now() - STUCK_DEPLOY_MS;
                 const servers = await Mongodb.getServersCollection()
@@ -1757,19 +2111,33 @@ namespace NodeService {
         }
         await pullServerLists();
         await refreshBlacklistedPeers();
+        // Pollers run on all instances but only fetch while leader (guard-at-top);
+        // non-leaders fill _status from the snapshot loop below.
         watchLiteNodes();
         watchBobNodes();
-        watchAndRefreshGroupIds();
         if (!IS_NO_DB) {
+            // All instances: publish/consume the realtime snapshot + converge
+            // server/blacklist/ssh-port caches.
+            watchRealtimeSnapshot();
+            watchAndRefreshServerData();
+            watchClusterHeartbeat();
+            watchDbHealth();
+            watchAndRefreshIpInfoCache();
+            // Leader-only automation (each self-gates via LeaderService.isLeader()).
+            watchAndRefreshGroupIds();
             watchAndSaveSnapshot();
             watchMainNode();
+            watchNodeDownAlerts();
             watchAndPromoteMain();
             watchTtydConsoles();
-            watchAndRefreshIpInfoCache();
-            reconcileStaleStatesOnBoot();
             watchStalePendingCommands();
             watchStuckDeploys();
+            // Reconcile stale states whenever THIS instance becomes leader (boot
+            // or failover) — not just at process start.
+            LeaderService.onBecomeLeader(reconcileStaleStatesOnBoot);
         } else {
+            // NO_DB is always-leader, single instance — behavior unchanged.
+            watchAndRefreshGroupIds();
             watchAndEvictNoDbPeers();
             logger.info(
                 "🌱 NO_DB: skipping watchAndSaveSnapshot, watchMainNode, watchAndPromoteMain"

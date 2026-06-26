@@ -1,5 +1,6 @@
 import { MongoDbTypes } from "../database/db.js";
 import { logger } from "../utils/logger.js";
+import { sleep } from "../utils/time.js";
 
 namespace GithubService {
     export interface GithubAsset {
@@ -274,6 +275,30 @@ namespace GithubService {
         return url;
     }
 
+    // Re-pull tags periodically on EVERY instance so a manual
+    // /refresh-github-tags handled by one instance converges across the fleet
+    // (each instance keeps its own in-memory _tags cache). Idempotent external GET.
+    const TAGS_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+    async function watchAndRefreshTags() {
+        while (true) {
+            await sleep(TAGS_REFRESH_INTERVAL_MS);
+            for (const service of [
+                MongoDbTypes.ServiceType.LiteNode,
+                MongoDbTypes.ServiceType.BobNode,
+            ]) {
+                try {
+                    await pullTagsFromGithub(service);
+                } catch (error) {
+                    logger.error(
+                        `Error refreshing GitHub tags: ${
+                            (error as Error).message
+                        }`
+                    );
+                }
+            }
+        }
+    }
+
     export async function start() {
         if (!_github_token) {
             throw new Error("GITHUB_TOKEN is not set");
@@ -299,6 +324,7 @@ namespace GithubService {
         ]) {
             await pullTagsFromGithub(service);
         }
+        watchAndRefreshTags();
     }
 }
 

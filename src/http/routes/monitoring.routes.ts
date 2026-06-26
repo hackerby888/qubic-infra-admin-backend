@@ -107,18 +107,42 @@ router.post("/checkin", async (req, res) => {
             }
         }
         // rate limit: only allow checkin once every 30 minutes per ip+type+operator
-        let rateLimitKey = `${ip}-${body.type}-${body.operator}`;
-        let now = Date.now();
-        if (
-            lastCheckinMap[rateLimitKey] &&
-            now - lastCheckinMap[rateLimitKey] < 30 * 60 * 1000
-        ) {
-            res.status(429).json({
-                error: "Too many checkins. Please wait before checking in again.",
-            });
-            return;
+        const rateLimitKey = `${ip}-${body.type}-${body.operator}`;
+        const now = Date.now();
+        const RATE_LIMIT_MS = 30 * 60 * 1000;
+        if (IS_NO_DB) {
+            if (
+                lastCheckinMap[rateLimitKey] &&
+                now - lastCheckinMap[rateLimitKey] < RATE_LIMIT_MS
+            ) {
+                res.status(429).json({
+                    error: "Too many checkins. Please wait before checking in again.",
+                });
+                return;
+            }
+            lastCheckinMap[rateLimitKey] = now;
+        } else {
+            // Cross-instance: atomic check-and-set in a TTL collection so a node
+            // can't bypass the window by hitting a different instance. An insert
+            // (upsertedCount===1) means the window was free; a match means it's
+            // still open → 429.
+            const r = await Mongodb.getCheckinRateLimitCollection().updateOne(
+                { _id: rateLimitKey },
+                {
+                    $setOnInsert: {
+                        createdAt: now,
+                        expiresAt: new Date(now + RATE_LIMIT_MS),
+                    },
+                },
+                { upsert: true, writeConcern: { w: 1 } }
+            );
+            if (r.upsertedCount === 0) {
+                res.status(429).json({
+                    error: "Too many checkins. Please wait before checking in again.",
+                });
+                return;
+            }
         }
-        lastCheckinMap[rateLimitKey] = now;
         // insert to mongodb
         const checkinDoc = {
             ...body,

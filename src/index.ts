@@ -5,12 +5,10 @@ import { NodeService } from "./services/node-service.js";
 import { Mongodb, IS_NO_DB } from "./database/db.js";
 import { SocketServer } from "./http/socket-server.js";
 import { MapService } from "./services/map-service.js";
-import { lastCheckinMap } from "./utils/common.js";
+import { LeaderService } from "./services/leader-service.js";
 import fs from "fs/promises";
 import { logger } from "./utils/logger.js";
 import { Gmail } from "./utils/gmail.js";
-
-const LAST_CHECKIN_MAP_FILE = `${process.cwd()}/data/lastCheckinMap.json`;
 
 function checkEnvVariables() {
     const requiredVars = [
@@ -51,30 +49,16 @@ async function dataSetup() {
     } catch (err: any) {
         logger.error("❌ Error creating data directory:", err.message);
     }
-    // load lastCheckinMap from file
-    try {
-        const data = await fs.readFile(LAST_CHECKIN_MAP_FILE, "utf-8");
-        const parsedMap: Record<string, number> = JSON.parse(data);
-        Object.assign(lastCheckinMap, parsedMap);
-        logger.info("💾 lastCheckinMap loaded.");
-    } catch (err) {
-        logger.info("No existing lastCheckinMap found, starting fresh.");
-    }
+    // Checkin rate-limit state now lives in Mongo (TTL collection) so it's
+    // shared across instances; no file to load. NO_DB uses an in-memory map.
 }
 
 let shuttingDown = false;
 async function handleShutdown(signal: string) {
     if (shuttingDown) return;
     shuttingDown = true;
-    try {
-        await fs.writeFile(
-            LAST_CHECKIN_MAP_FILE,
-            JSON.stringify(lastCheckinMap, null, 2)
-        );
-        logger.info("💾 lastCheckinMap saved.");
-    } catch (err: any) {
-        logger.error("❌ Error saving lastCheckinMap:", err.message);
-    }
+    // Release leadership first so a standby takes over within a renew tick.
+    await LeaderService.resign();
     try {
         await Promise.race([
             Gmail.sendServerStoppedEmail({ reason: signal }),
@@ -95,6 +79,7 @@ async function main() {
     await dataSetup();
     checkEnvVariables();
     await Mongodb.connectDB();
+    await LeaderService.start();
     // Don't block boot on SMTP — production firewalls may block egress.
     Gmail.verify().catch(() => {});
     await MapService.start();

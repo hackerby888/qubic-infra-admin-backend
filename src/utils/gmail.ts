@@ -159,6 +159,79 @@ export namespace Gmail {
         });
     }
 
+    export async function sendNodeDownEmail({
+        server,
+        service,
+    }: {
+        server: string;
+        service: string;
+    }): Promise<boolean> {
+        const recipients = getAlertRecipients();
+        if (recipients.length === 0) return false;
+        const at = new Date().toISOString();
+        return sendEmail({
+            from: `"Qubic Global Automated Sender" <${process.env.GMAIL_USER}>`,
+            to: recipients,
+            subject: `⛔ Node DOWN: ${server} (${service})`,
+            text: `Managed ${service} node ${server} is DOWN (unreachable or tick frozen for over 2 minutes) as of ${at}. Please check the host.`,
+            html: `<b>⛔ Managed ${service} node ${server} is DOWN</b> (unreachable or tick frozen for over 2 minutes) as of <code>${at}</code>. Please check the host.`,
+        });
+    }
+
+    export async function sendNodeRecoveredEmail({
+        server,
+        service,
+    }: {
+        server: string;
+        service: string;
+    }): Promise<boolean> {
+        const recipients = getAlertRecipients();
+        if (recipients.length === 0) return false;
+        return sendEmail({
+            from: `"Qubic Global Automated Sender" <${process.env.GMAIL_USER}>`,
+            to: recipients,
+            subject: `✅ Node recovered: ${server} (${service})`,
+            text: `Managed ${service} node ${server} is back online.`,
+            html: `<b>✅ Managed ${service} node ${server}</b> is back online.`,
+        });
+    }
+
+    export async function sendDbDownEmail({
+        error,
+    }: {
+        error: string;
+    }): Promise<boolean> {
+        const recipients = getAlertRecipients();
+        if (recipients.length === 0) return false;
+        const host = process.env.HOSTNAME || "unknown-host";
+        const at = new Date().toISOString();
+        return sendEmail({
+            from: `"Qubic Global Automated Sender" <${process.env.GMAIL_USER}>`,
+            to: recipients,
+            subject: `⛔ MongoDB UNREACHABLE (reported by ${host})`,
+            text: `Backend instance ${host} cannot reach MongoDB as of ${at}. Error: ${error}.`,
+            html: `<b>⛔ MongoDB unreachable</b> — reported by instance <code>${host}</code> at <code>${at}</code>.<br/>Error: <i>${error}</i>`,
+        });
+    }
+
+    export async function sendDbRecoveredEmail({
+        downForMs,
+    }: {
+        downForMs: number;
+    }): Promise<boolean> {
+        const recipients = getAlertRecipients();
+        if (recipients.length === 0) return false;
+        const host = process.env.HOSTNAME || "unknown-host";
+        const secs = Math.round(downForMs / 1000);
+        return sendEmail({
+            from: `"Qubic Global Automated Sender" <${process.env.GMAIL_USER}>`,
+            to: recipients,
+            subject: `✅ MongoDB recovered (reported by ${host})`,
+            text: `Backend instance ${host} reconnected to MongoDB after ${secs}s.`,
+            html: `<b>✅ MongoDB recovered</b> — instance <code>${host}</code> reconnected after <code>${secs}s</code>.`,
+        });
+    }
+
     // Suppress unused warning when verified is read elsewhere
     export function isVerified() {
         return verified;

@@ -1,10 +1,13 @@
 import { Server, Socket } from "socket.io";
+import { createAdapter } from "@socket.io/mongo-adapter";
 import { logger } from "../utils/logger.js";
-import { Mongodb, MongoDbTypes } from "../database/db.js";
+import { Mongodb, MongoDbTypes, IS_NO_DB } from "../database/db.js";
 import { SSHService } from "../services/ssh-service.js";
 import { NodeService } from "../services/node-service.js";
 import { sleep } from "../utils/time.js";
 import WebSocket from "ws";
+
+const ADAPTER_COLLECTION = "socket_io_adapter_events";
 
 declare module "socket.io" {
     interface Socket {
@@ -113,6 +116,21 @@ export namespace SocketServer {
             cors: { origin: "*" },
         });
 
+        // Cross-instance broadcast (promote/demote events) via MongoDB change
+        // streams (replica-set only). The 1s realtime stats loop stays per-socket
+        // (local) — it must NOT go through the adapter or it would N-fold
+        // duplicate. NO_DB / standalone uses the default in-memory adapter.
+        if (!IS_NO_DB) {
+            const collection = Mongodb.getDB().collection(ADAPTER_COLLECTION);
+            collection
+                .createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 })
+                .catch(() => {});
+            io.adapter(createAdapter(collection, { addCreatedAtField: true }));
+            logger.info(
+                "🔌 Socket.IO using MongoDB adapter (cross-instance broadcast)"
+            );
+        }
+
         io.on("connection", (socket) => {
             ///////////////// Subscribe to Service Logs /////////////////
 
@@ -162,6 +180,9 @@ export namespace SocketServer {
                             0,
                             {
                                 sshPrivateKey: serverDoc.sshPrivateKey,
+                                // Read-only long-lived stream → skip the
+                                // distributed host lock so it can't block deploys.
+                                passive: true,
                                 onData: (logData: string) => {
                                     socket.emit("serviceLogUpdate", {
                                         service: data.service,
@@ -244,6 +265,10 @@ export namespace SocketServer {
                 (data: { operator?: string }) => {
                     if (data?.operator) socket.operator = data.operator;
                     notificationSockets.add(socket);
+                    // Join rooms so the leader's promote/demote events reach this
+                    // socket via the Mongo adapter even on another instance.
+                    socket.join("notif:" + (socket.operator || ""));
+                    if (socket.operator === "admin") socket.join("notif:admin");
                 }
             );
 
@@ -338,14 +363,12 @@ export namespace SocketServer {
         });
 
         NodeService.onMainNodeEvent((event) => {
-            for (const socket of notificationSockets) {
-                if (
-                    socket.operator === "admin" ||
-                    socket.operator === event.operator
-                ) {
-                    socket.emit("mainNodeEvent", event);
-                }
-            }
+            // Room emit fans out cluster-wide via the adapter: admins (notif:admin)
+            // + that operator's sockets (notif:<operator>), de-duplicated by
+            // Socket.IO across the two rooms.
+            io.to("notif:admin")
+                .to("notif:" + event.operator)
+                .emit("mainNodeEvent", event);
         });
 
         watchAndbroadcastRealtimeStats();

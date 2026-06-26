@@ -291,6 +291,54 @@ export namespace MongoDbTypes {
         key: string;
         value: string;
     }
+
+    // ---- Multi-instance clustering coordination (see docs/CLUSTERING.md) ----
+
+    // Single-doc (`_id:"leader"`) Mongo TTL lease. Whichever instance owns the
+    // unexpired lease is the leader and runs polling + SSH automation.
+    export interface LeaderElection {
+        _id: string; // always "leader"
+        instanceId: string;
+        acquiredAt: number;
+        renewedAt: number;
+        expiresAt: Date; // TTL-indexed (crash backstop) + lease comparison
+    }
+
+    // Distributed per-host SSH lock (`_id:"<host>"`). Serializes mutating SSH
+    // across instances so a deploy/command never collides with another.
+    export interface SshLock {
+        _id: string; // host
+        instanceId: string;
+        acquiredAt: number;
+        expiresAt: Date; // TTL-indexed reap if the holder crashes
+    }
+
+    // Cross-instance checkin rate-limit window (`_id:"<ip>-<type>-<operator>"`).
+    export interface CheckinRateLimit {
+        _id: string;
+        createdAt: number;
+        expiresAt: Date; // TTL-reaped at the end of the window
+    }
+
+    // Realtime node-status snapshot the leader publishes (`_id:"system"` and
+    // `_id:"checkin"`); non-leaders read it to serve identical realtime data.
+    export interface RealtimeStatusSnapshot {
+        _id: string; // "system" | "checkin"
+        liteServers: Record<string, any>;
+        bobServers: Record<string, any>;
+        updatedAt: number;
+        writerInstanceId: string;
+    }
+
+    // Per-instance heartbeat (`_id:"<instanceId>"`) for the System Health admin
+    // view. TTL on `lastSeen` reaps a dead instance ~30s after its last beat.
+    export interface ClusterMember {
+        _id: string; // instanceId
+        leader: boolean;
+        uptimeSec: number;
+        snapshotAgeMs: number | null;
+        lastSeen: Date;
+    }
 }
 
 export namespace Mongodb {
@@ -307,35 +355,114 @@ export namespace Mongodb {
 
         if (db) return db; // reuse existing connection
 
-        logger.info("🔌 Connecting to MongoDB...");
-        client = new MongoClient(uri);
-        await client.connect();
+        // Replica-set-aware client. retryWrites/retryReads ride out a primary
+        // step-down; primaryPreferred keeps reads up during an election.
+        // High-frequency regenerable writes (snapshot/locks/rate-limit) override
+        // to { w: 1 } per-op so they don't pay majority-ack latency.
+        client = new MongoClient(uri, {
+            retryWrites: true,
+            retryReads: true,
+            w: "majority",
+            readPreference: "primaryPreferred",
+            serverSelectionTimeoutMS: 10_000,
+            maxPoolSize: 50,
+            minPoolSize: 5,
+        });
+
+        // The initial connect can race a replica-set election on cold start;
+        // retry with backoff instead of crashing. The driver auto-reconnects
+        // after the first successful connect.
+        const MAX_ATTEMPTS = 10;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                logger.info(
+                    `🔌 Connecting to MongoDB (attempt ${attempt}/${MAX_ATTEMPTS})...`
+                );
+                await client.connect();
+                await client.db(dbName).command({ ping: 1 });
+                break;
+            } catch (err: any) {
+                if (attempt === MAX_ATTEMPTS) {
+                    logger.error(
+                        `❌ MongoDB connect failed after ${MAX_ATTEMPTS} attempts: ${err.message}`
+                    );
+                    throw err;
+                }
+                const backoff = Math.min(30_000, 1_000 * 2 ** (attempt - 1));
+                logger.warn(
+                    `⚠️ MongoDB connect failed (${err.message}); retrying in ${backoff}ms`
+                );
+                await new Promise((r) => setTimeout(r, backoff));
+            }
+        }
 
         db = client.db(dbName);
         logger.info("🔌 Connected to MongoDB");
 
-        // Setup indexes
-        await getLiteNodeCollection().createIndex(
-            { server: 1 },
-            { unique: true }
-        );
-        await getBobNodeCollection().createIndex(
-            { server: 1 },
-            { unique: true }
-        );
-        await getUsersCollection().createIndex(
-            { username: 1 },
-            { unique: true }
-        );
-        await getServersCollection().createIndex(
-            { server: 1 },
-            { unique: true }
-        );
-        await getBlacklistedPeersCollection().createIndex(
-            { ip: 1 },
-            { unique: true }
-        );
+        await setupIndexes();
         return db;
+    }
+
+    // Idempotent index setup. Each build is wrapped so a transient error or a
+    // pre-existing duplicate (on a unique build) can't crash boot, and so
+    // concurrent identical builds across instances are harmless.
+    async function setupIndexes() {
+        const idx = async (label: string, fn: () => Promise<unknown>) => {
+            try {
+                await fn();
+            } catch (err: any) {
+                logger.warn(
+                    `⚠️ Index setup (${label}) skipped: ${err.message}`
+                );
+            }
+        };
+
+        await idx("lite_nodes.server", () =>
+            getLiteNodeCollection().createIndex({ server: 1 }, { unique: true })
+        );
+        await idx("bob_nodes.server", () =>
+            getBobNodeCollection().createIndex({ server: 1 }, { unique: true })
+        );
+        await idx("users.username", () =>
+            getUsersCollection().createIndex({ username: 1 }, { unique: true })
+        );
+        await idx("servers.server", () =>
+            getServersCollection().createIndex({ server: 1 }, { unique: true })
+        );
+        await idx("blacklisted_peers.ip", () =>
+            getBlacklistedPeersCollection().createIndex(
+                { ip: 1 },
+                { unique: true }
+            )
+        );
+
+        // Clustering coordination — TTL on `expiresAt` (a Date) reaps a crashed
+        // holder's lease/lock/rate-limit doc even if app-side cleanup is skipped.
+        await idx("leader_election.ttl", () =>
+            getLeaderElectionCollection().createIndex(
+                { expiresAt: 1 },
+                { expireAfterSeconds: 0 }
+            )
+        );
+        await idx("ssh_locks.ttl", () =>
+            getSshLocksCollection().createIndex(
+                { expiresAt: 1 },
+                { expireAfterSeconds: 0 }
+            )
+        );
+        await idx("checkin_rate_limit.ttl", () =>
+            getCheckinRateLimitCollection().createIndex(
+                { expiresAt: 1 },
+                { expireAfterSeconds: 0 }
+            )
+        );
+        // Reap a dead instance's heartbeat ~30s after its last beat.
+        await idx("cluster_members.ttl", () =>
+            getClusterMembersCollection().createIndex(
+                { lastSeen: 1 },
+                { expireAfterSeconds: 30 }
+            )
+        );
     }
 
     export async function disconnectDB() {
@@ -405,6 +532,34 @@ export namespace Mongodb {
 
     export function getSettingsCollection() {
         return getDB().collection<MongoDbTypes.Setting>("settings");
+    }
+
+    export function getLeaderElectionCollection() {
+        return getDB().collection<MongoDbTypes.LeaderElection>(
+            "leader_election"
+        );
+    }
+
+    export function getSshLocksCollection() {
+        return getDB().collection<MongoDbTypes.SshLock>("ssh_locks");
+    }
+
+    export function getCheckinRateLimitCollection() {
+        return getDB().collection<MongoDbTypes.CheckinRateLimit>(
+            "checkin_rate_limit"
+        );
+    }
+
+    export function getRealtimeStatusCollection() {
+        return getDB().collection<MongoDbTypes.RealtimeStatusSnapshot>(
+            "realtime_status"
+        );
+    }
+
+    export function getClusterMembersCollection() {
+        return getDB().collection<MongoDbTypes.ClusterMember>(
+            "cluster_members"
+        );
     }
 
     export async function addLiteNode(node: MongoDbTypes.LiteNode) {

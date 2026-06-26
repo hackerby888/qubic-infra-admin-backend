@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "@iplookup/country": "^1.0.20251107",
+    "@socket.io/mongo-adapter": "^0.4.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",

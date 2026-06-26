@@ -3,7 +3,7 @@ import { Client } from "ssh2";
 import EventEmitter from "events";
 import fs from "fs";
 import { logger } from "../utils/logger.js";
-import { Mongodb, MongoDbTypes } from "../database/db.js";
+import { Mongodb, MongoDbTypes, IS_NO_DB } from "../database/db.js";
 import stripAnsi from "strip-ansi";
 import {
     getBasenameFromUrl,
@@ -11,6 +11,7 @@ import {
     inlineBashCommands,
 } from "../utils/common.js";
 import { NodeService } from "./node-service.js";
+import { LeaderService } from "./leader-service.js";
 
 namespace Utils {
     export function getBobConfigOverrideObject(peers: string[]) {
@@ -378,6 +379,12 @@ export namespace SSHService {
         delete sshPortCache[host];
     }
 
+    // Drop the whole SSH-port cache. Called periodically on every instance so a
+    // port edit handled by another instance can't leave us SSHing a stale port.
+    export function _clearAllSSHPortCache() {
+        sshPortCache = {};
+    }
+
     export async function _accquireExecutionLock(host: string) {
         while (
             _isExecutingCommandsMap[host] ||
@@ -393,6 +400,67 @@ export namespace SSHService {
 
     export async function _releaseExecutionLock(host: string) {
         _isExecutingCommandsMap[host] = false;
+    }
+
+    // ---- Distributed per-host SSH lock (multi-instance) ----
+    // Serializes mutating SSH to a host across ALL instances (the per-process
+    // _isExecutingCommandsMap can't span processes). TTL on `expiresAt` reaps a
+    // crashed holder's lock. See docs/CLUSTERING.md.
+    const HOST_LOCK_LEASE_MS = 6 * 60 * 1000; // > longest mutating op (~3 min)
+    const HOST_LOCK_SPIN_MS = 250;
+    const HOST_LOCK_MAX_WAIT_MS = 6 * 60 * 1000;
+
+    export async function _acquireHostLock(host: string) {
+        const owner = LeaderService.getInstanceId();
+        const deadline = Date.now() + HOST_LOCK_MAX_WAIT_MS;
+        while (true) {
+            const now = Date.now();
+            try {
+                // Matches only if the lock is absent (→ insert) or expired
+                // (→ takeover). A live lock held by another instance matches
+                // nothing → upsert tries to insert a duplicate _id → E11000 →
+                // wait and retry.
+                const r = await Mongodb.getSshLocksCollection().findOneAndUpdate(
+                    { _id: host, expiresAt: { $lt: new Date(now) } },
+                    {
+                        $set: {
+                            instanceId: owner,
+                            acquiredAt: now,
+                            expiresAt: new Date(now + HOST_LOCK_LEASE_MS),
+                        },
+                    },
+                    { upsert: true, returnDocument: "after" }
+                );
+                if (r?.instanceId === owner) return;
+            } catch (err: any) {
+                if (err?.code !== 11000) {
+                    logger.error(
+                        `SSH host lock error for ${host}: ${err.message}`
+                    );
+                }
+                // 11000 => held by another live instance; fall through to wait.
+            }
+            if (Date.now() > deadline) {
+                logger.warn(
+                    `⏱️ SSH host lock wait timed out for ${host}; proceeding without it (fail-open).`
+                );
+                return;
+            }
+            await new Promise((res) => setTimeout(res, HOST_LOCK_SPIN_MS));
+        }
+    }
+
+    export async function _releaseHostLock(host: string) {
+        try {
+            await Mongodb.getSshLocksCollection().deleteOne({
+                _id: host,
+                instanceId: LeaderService.getInstanceId(),
+            });
+        } catch (err: any) {
+            logger.error(
+                `Failed to release SSH host lock for ${host}: ${err.message}`
+            );
+        }
     }
 
     export function getSetupCommands() {
@@ -853,6 +921,9 @@ export namespace SSHService {
             onData?: (data: string) => void;
             isNonInteractive?: boolean;
             sshPrivateKey?: string;
+            // Passive = read-only, long-lived stream (e.g. log tailing). Skips
+            // the distributed per-host lock so it can't block deploys/commands.
+            passive?: boolean;
         } = {}
     ) {
         let stdouts: {
@@ -896,6 +967,11 @@ export namespace SSHService {
                 liteNodeInfo = NodeService.getLiteNodeInfo(host);
             }
         }
+
+        // Distributed per-host lock first (cross-instance), then the per-process
+        // lock. Passive log streams bypass the distributed lock.
+        const useHostLock = !extraData.passive && !IS_NO_DB;
+        if (useHostLock) await _acquireHostLock(host);
 
         await _accquireExecutionLock(host);
         let startTime = Date.now();
@@ -1156,6 +1232,7 @@ export namespace SSHService {
         }
 
         await _releaseExecutionLock(host);
+        if (useHostLock) await _releaseHostLock(host);
         let endTime = Date.now();
         let durationInMillis = endTime - startTime;
         delete cleanUpSSHMap[host];

@@ -38,6 +38,8 @@ router.get("/system-health", authenticateToken, async (req, res) => {
                     snapshotAgeMs: m.snapshotAgeMs ?? null,
                     lastSeenMs,
                     stale: lastSeenMs === null || lastSeenMs > 15_000,
+                    commit: m.commit ?? null,
+                    startedAt: m.startedAt ?? null,
                 };
             })
             .sort((a, b) => Number(b.leader) - Number(a.leader));

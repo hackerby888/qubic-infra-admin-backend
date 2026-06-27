@@ -2,6 +2,7 @@ import express from "express";
 import { Mongodb, IS_NO_DB } from "../../database/db.js";
 import { LeaderService } from "../../services/leader-service.js";
 import { NodeService } from "../../services/node-service.js";
+import { BuildInfo } from "../../utils/build-info.js";
 
 const router = express.Router();
 
@@ -17,6 +18,8 @@ router.get("/health", async (req, res) => {
     const base = {
         instanceId: LeaderService.getInstanceId(),
         leader: LeaderService.isLeader(),
+        commit: BuildInfo.commit,
+        startedAt: BuildInfo.startedAt.toISOString(),
         snapshotAgeMs: NodeService.getRealtimeSnapshotAgeMs(),
         uptime: Math.round(process.uptime()),
     };

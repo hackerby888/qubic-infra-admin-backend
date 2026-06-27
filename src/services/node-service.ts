@@ -9,6 +9,7 @@ import { sleep } from "../utils/time.js";
 import { Checkin } from "./logic/checkin.js";
 import { SSHService } from "./ssh-service.js";
 import { LeaderService } from "./leader-service.js";
+import { BuildInfo } from "../utils/build-info.js";
 import * as geolib from "geolib";
 import { isIPv4 } from "net";
 import fs from "fs/promises";
@@ -969,6 +970,8 @@ namespace NodeService {
                             uptimeSec: Math.round(process.uptime()),
                             snapshotAgeMs: getRealtimeSnapshotAgeMs(),
                             lastSeen: new Date(),
+                            commit: BuildInfo.commit,
+                            startedAt: BuildInfo.startedAt,
                         },
                     },
                     { upsert: true, writeConcern: { w: 1 } }

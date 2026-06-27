@@ -338,6 +338,8 @@ export namespace MongoDbTypes {
         uptimeSec: number;
         snapshotAgeMs: number | null;
         lastSeen: Date;
+        commit?: string; // deployed git short SHA
+        startedAt?: Date; // process start = when this instance was last deployed
     }
 }
 

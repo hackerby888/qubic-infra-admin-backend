@@ -1,23 +1,24 @@
 name: deploy
 
-# THE single fleet-rollout mechanism. Two ways to trigger it:
-#   1. Web UI  → backend `POST /deploy-fleet` → GitHub workflow_dispatch (this file).
-#   2. Manually → GitHub Actions "Run workflow", or `gh workflow run deploy.yml`
-#      — the fallback when the backend itself is unreachable.
+# Rolling deploy to the PM2 backend fleet. Trigger: GitHub only.
+#   Actions -> deploy -> Run workflow, or:  gh workflow run deploy.yml -f ref=main
 #
-# It SSHes the Swarm MANAGER (one box) and runs a rolling `docker service update`;
-# the manager then rolls every node one-at-a-time. No per-host SSH.
+# SSHes each box in turn (BE1 then BE2) and runs git pull -> build -> pm2 restart.
+# `set -e` means a failed build aborts BEFORE the restart, so the box keeps
+# serving its old code; the failed step also stops the job, so BE2 is left
+# untouched. The other box always serves while one restarts (Cloudflare LB).
 #
 # Required repo secrets:
-#   SWARM_MANAGER_HOST, SWARM_MANAGER_USER, SWARM_MANAGER_SSH_KEY
-#   (optional) SWARM_MANAGER_SSH_PORT  — defaults to 22
+#   BE1_HOST, BE2_HOST            - backend public IPs
+#   DEPLOY_SSH_KEY               - private key authorized as root on both boxes
+#   (optional) DEPLOY_SSH_PORT   - defaults to 22
 on:
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: "Image tag to roll out"
+      ref:
+        description: "git ref (branch / tag / SHA) to deploy"
         required: false
-        default: latest
+        default: main
 
 concurrency:
   group: fleet-deploy
@@ -27,21 +28,48 @@ jobs:
   rollout:
     runs-on: ubuntu-latest
     steps:
-      - name: Rolling update on the Swarm manager
+      - name: Deploy BE1 (leader-capable)
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.SWARM_MANAGER_HOST }}
-          username: ${{ secrets.SWARM_MANAGER_USER }}
-          key: ${{ secrets.SWARM_MANAGER_SSH_KEY }}
-          port: ${{ secrets.SWARM_MANAGER_SSH_PORT || 22 }}
+          host: ${{ secrets.BE1_HOST }}
+          username: root
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          command_timeout: 10m
           script: |
             set -e
-            docker service update \
-              --image ghcr.io/${{ github.repository }}:${{ github.event.inputs.image_tag }} \
-              --with-registry-auth \
-              --update-parallelism 1 \
-              --update-delay 20s \
-              --update-order start-first \
-              --update-failure-action rollback \
-              backend_backend
-            docker service ps --no-trunc backend_backend | head -20
+            export PATH=/root/.nvm/versions/node/v24.14.0/bin:$PATH
+            cd /root/qubic-infra-admin-backend
+            REF="${{ github.event.inputs.ref }}"
+            git fetch origin --prune --tags
+            git checkout -f "$REF"
+            git reset --hard "origin/$REF" 2>/dev/null || true   # ff branch to tip; no-op for tag/SHA
+            echo "deploying $(git rev-parse --short HEAD)"
+            npm ci
+            npm run build
+            pm2 restart qubic --update-env
+            sleep 6
+            curl -fsS http://127.0.0.1:80/health && echo " <- BE1 healthy"
+
+      - name: Deploy BE2 (only after BE1 healthy)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.BE2_HOST }}
+          username: root
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          command_timeout: 10m
+          script: |
+            set -e
+            export PATH=/root/.nvm/versions/node/v24.14.0/bin:$PATH
+            cd /root/qubic-infra-admin-backend
+            REF="${{ github.event.inputs.ref }}"
+            git fetch origin --prune --tags
+            git checkout -f "$REF"
+            git reset --hard "origin/$REF" 2>/dev/null || true
+            echo "deploying $(git rev-parse --short HEAD)"
+            npm ci
+            npm run build
+            pm2 restart qubic --update-env
+            sleep 6
+            curl -fsS http://127.0.0.1:80/health && echo " <- BE2 healthy"

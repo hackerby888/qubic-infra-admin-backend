@@ -1,17 +1,23 @@
 name: deploy
 
-# Rolling deploy to the PM2 backend fleet. Trigger: GitHub only.
-#   Actions -> deploy -> Run workflow, or:  gh workflow run deploy.yml -f ref=main
+# Rolling deploy to the PM2 backend fleet — data-driven, GitHub-trigger only.
+#   gh workflow run deploy.yml -f ref=main      (or Actions -> deploy -> Run)
 #
-# SSHes each box in turn (BE1 then BE2) and runs git pull -> build -> pm2 restart.
-# `set -e` means a failed build aborts BEFORE the restart, so the box keeps
-# serving its old code; the failed step also stops the job, so BE2 is left
-# untouched. The other box always serves while one restarts (Cloudflare LB).
+# The fleet is ONE repo variable:
+#   vars.BACKEND_HOSTS = JSON array of host IPs, e.g. ["77.42.74.26","40.160.3.59"]
+# The matrix fans out over it. max-parallel:1 = rolling (one box at a time);
+# fail-fast = a failed box halts the roll so the rest keep their old build.
 #
-# Required repo secrets:
-#   BE1_HOST, BE2_HOST            - backend public IPs
-#   DEPLOY_SSH_KEY               - private key authorized as root on both boxes
-#   (optional) DEPLOY_SSH_PORT   - defaults to 22
+# >>> ADD AN INSTANCE = append its IP to the variable, no workflow edit:
+#       gh variable set BACKEND_HOSTS -b '["77.42.74.26","40.160.3.59","NEW_IP"]'
+#     (provision the box with scripts/bootstrap-backend.sh, then add it to the
+#      Cloudflare LB pool).
+#
+# Each box must follow the convention: nvm node, repo at
+# /root/qubic-infra-admin-backend, pm2 app "qubic", app on PORT 80.
+#
+# Required: vars.BACKEND_HOSTS (JSON array), secrets.DEPLOY_SSH_KEY (root on all).
+# Optional: vars.DEPLOY_SSH_PORT (default 22).
 on:
   workflow_dispatch:
     inputs:
@@ -25,51 +31,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  rollout:
+  deploy:
     runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1 # rolling: one instance at a time
+      fail-fast: true # a failed box halts the roll -> others keep old build
+      matrix:
+        host: ${{ fromJSON(vars.BACKEND_HOSTS) }}
+    name: deploy ${{ matrix.host }}
     steps:
-      - name: Deploy BE1 (leader-capable)
+      - name: Pull + build + restart
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.BE1_HOST }}
+          host: ${{ matrix.host }}
           username: root
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          port: ${{ vars.DEPLOY_SSH_PORT || 22 }}
           command_timeout: 10m
           script: |
             set -e
-            export PATH=/root/.nvm/versions/node/v24.14.0/bin:$PATH
-            cd /root/qubic-infra-admin-backend
+            APP_DIR=/root/qubic-infra-admin-backend
+            APP_NAME=qubic
+            # Resolve node from nvm (default alias, else any installed, else newest bin).
+            export NVM_DIR="$HOME/.nvm"
+            . "$NVM_DIR/nvm.sh" 2>/dev/null || true
+            nvm use default >/dev/null 2>&1 || nvm use node >/dev/null 2>&1 || true
+            command -v node >/dev/null || export PATH="$(ls -d $NVM_DIR/versions/node/*/bin 2>/dev/null | sort -V | tail -1):$PATH"
+            node -v
+            cd "$APP_DIR"
             REF="${{ github.event.inputs.ref }}"
             git fetch origin --prune --tags
             git checkout -f "$REF"
-            git reset --hard "origin/$REF" 2>/dev/null || true   # ff branch to tip; no-op for tag/SHA
-            echo "deploying $(git rev-parse --short HEAD)"
+            git reset --hard "origin/$REF" 2>/dev/null || true   # ff branch; no-op for tag/SHA
+            echo "deploying $(git rev-parse --short HEAD) on $(hostname)"
             npm ci
             npm run build
-            pm2 restart qubic --update-env
+            pm2 restart "$APP_NAME" --update-env
             sleep 6
-            curl -fsS http://127.0.0.1:80/health && echo " <- BE1 healthy"
-
-      - name: Deploy BE2 (only after BE1 healthy)
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.BE2_HOST }}
-          username: root
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
-          command_timeout: 10m
-          script: |
-            set -e
-            export PATH=/root/.nvm/versions/node/v24.14.0/bin:$PATH
-            cd /root/qubic-infra-admin-backend
-            REF="${{ github.event.inputs.ref }}"
-            git fetch origin --prune --tags
-            git checkout -f "$REF"
-            git reset --hard "origin/$REF" 2>/dev/null || true
-            echo "deploying $(git rev-parse --short HEAD)"
-            npm ci
-            npm run build
-            pm2 restart qubic --update-env
-            sleep 6
-            curl -fsS http://127.0.0.1:80/health && echo " <- BE2 healthy"
+            curl -fsS http://127.0.0.1:80/health && echo " <- healthy"

@@ -117,6 +117,7 @@ router.post("/checkin", async (req, res) => {
             ) {
                 res.status(429).json({
                     error: "Too many checkins. Please wait before checking in again.",
+                    rateLimitKey: rateLimitKey
                 });
                 return;
             }
@@ -139,6 +140,7 @@ router.post("/checkin", async (req, res) => {
             if (r.upsertedCount === 0) {
                 res.status(429).json({
                     error: "Too many checkins. Please wait before checking in again.",
+                    rateLimitKey: rateLimitKey
                 });
                 return;
             }
@@ -156,7 +158,7 @@ router.post("/checkin", async (req, res) => {
             const peerType = body.type === "bob" ? "bob" : "lite";
             NodeService.addNoDbPeer(peerType, ip);
         }
-        res.json({ message: "Checkin successful" });
+        res.json({ message: "Checkin successful", rateLimitKey });
     } catch (error) {
         logger.error(`Error in checkin: ${(error as Error).message}`);
         res.status(500).json({

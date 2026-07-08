@@ -1912,7 +1912,18 @@ namespace NodeService {
 
     // Run once at boot: anything still "pending"/transient can only be a
     // leftover from a previous process (in-flight ops don't survive a restart).
+    // Run the aggressive reset only ONCE per process (first leader acquisition),
+    // not on every re-acquisition. onBecomeLeader also fires on a same-instance
+    // leader flap (transient Mongo error → lose+regain the lease); re-running
+    // this then would stamp a deploy/restart/command still genuinely in flight
+    // in THIS process as error/failed. Failover cleanup of a dead leader's
+    // orphans is preserved: the instance that TAKES OVER runs this on its own
+    // first acquisition (it has nothing in flight), and the age-based
+    // watchStuckDeploys / watchStalePendingCommands backstop the rest after 6 min.
+    let _reconcileRan = false;
     async function reconcileStaleStatesOnBoot() {
+        if (_reconcileRan) return;
+        _reconcileRan = true;
         try {
             const res = await Mongodb.getCommandLogsCollection().updateMany(
                 { status: "pending" },
@@ -2135,8 +2146,10 @@ namespace NodeService {
             watchTtydConsoles();
             watchStalePendingCommands();
             watchStuckDeploys();
-            // Reconcile stale states whenever THIS instance becomes leader (boot
-            // or failover) — not just at process start.
+            // Reconcile stale states on this instance's FIRST leader acquisition
+            // (boot, or the failover that promotes a standby). Self-guarded to
+            // run once per process so a same-instance leader flap can't clobber
+            // in-flight ops — see reconcileStaleStatesOnBoot.
             LeaderService.onBecomeLeader(reconcileStaleStatesOnBoot);
         } else {
             // NO_DB is always-leader, single instance — behavior unchanged.

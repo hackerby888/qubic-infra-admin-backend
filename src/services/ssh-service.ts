@@ -788,18 +788,25 @@ export namespace SSHService {
                 return returnFailedObject;
             }
 
+            // Atomic per-field write (dotted path) so a concurrent op on the
+            // OTHER service (e.g. bob deploy while lite deploys, or a restart)
+            // isn't clobbered back to its stale value. A full-object read-modify
+            // -write off `currentServer.deployStatus` here would race the atomic
+            // $mergeObjects writers and flip a mid-op sibling to "active"/"error"
+            // while it's really still pending. Also stamp deployStatusAt so the
+            // stuck-deploy watchdog covers deploys, not just restarts.
+            const svcKey =
+                type === MongoDbTypes.ServiceType.LiteNode
+                    ? "liteNode"
+                    : "bobNode";
             await Mongodb.getServersCollection().updateOne(
                 {
                     server: host,
                 },
                 {
                     $set: {
-                        deployStatus: {
-                            ...currentServer.deployStatus,
-                            [type === MongoDbTypes.ServiceType.LiteNode
-                                ? "liteNode"
-                                : "bobNode"]: "setting_up",
-                        },
+                        [`deployStatus.${svcKey}`]: "setting_up",
+                        [`deployStatusAt.${svcKey}`]: Date.now(),
                     },
                 }
             );

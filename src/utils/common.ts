@@ -79,6 +79,18 @@ export function isNodeActive(lastTickChanged: number): boolean {
     return Date.now() - lastTickChanged < 2 * 60 * 1000;
 }
 
+export function isPeerEligible(
+    lastTickChanged: number,
+    epoch: number,
+    currentEpoch: number
+): boolean {
+    return (
+        currentEpoch > 0 &&
+        epoch === currentEpoch &&
+        isNodeActive(lastTickChanged)
+    );
+}
+
 export function mongodbOperatorSelection(operator: string) {
     if (operator === "admin") {
         return { $exists: true };

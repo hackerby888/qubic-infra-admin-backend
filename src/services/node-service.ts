@@ -1,6 +1,6 @@
 import { Mongodb, MongoDbTypes, IS_NO_DB } from "../database/db.js";
 import type { QueryPeersMode } from "../types/type.js";
-import { isNodeActive } from "../utils/common.js";
+import { isNodeActive, isPeerEligible } from "../utils/common.js";
 import { Gmail } from "../utils/gmail.js";
 import type { IpInfo } from "../utils/ip.js";
 import { logger } from "../utils/logger.js";
@@ -1150,22 +1150,18 @@ namespace NodeService {
             trustedNode?: boolean;
         } = {}
     ) {
-        let servers: string[] = [];
-        if (trustedNode) {
-            servers = Object.keys(_status.liteServers).filter((server) => {
-                return isNodeActive(
-                    _status.liteServers[server]?.lastTickChanged || 0
-                );
-            });
-        } else {
-            servers = Object.keys(_statusCheckin.liteServers).filter(
-                (server) => {
-                    return isNodeActive(
-                        _statusCheckin.liteServers[server]?.lastTickChanged || 0
-                    );
-                }
+        const currentEpoch = getNetworkStatus().epoch;
+        const nodes = trustedNode
+            ? _status.liteServers
+            : _statusCheckin.liteServers;
+        let servers = Object.keys(nodes).filter((server) => {
+            const node = nodes[server];
+            return isPeerEligible(
+                node?.lastTickChanged || 0,
+                node?.epoch ?? -1,
+                currentEpoch
             );
-        }
+        });
 
         // always exclude blacklisted peers from random-peers results
         servers = servers.filter((server) => !_blacklistedPeers.has(server));
@@ -1271,22 +1267,18 @@ namespace NodeService {
             trustedNode?: boolean;
         } = {}
     ) {
-        let servers: string[] = [];
-        if (trustedNode) {
-            servers = Object.keys(_status.bobServers).filter((server) => {
-                return isNodeActive(
-                    _status.bobServers[server]?.lastTickChanged || 0
-                );
-            });
-        } else {
-            servers = Object.keys(_statusCheckin.bobServers).filter(
-                (server) => {
-                    return isNodeActive(
-                        _statusCheckin.bobServers[server]?.lastTickChanged || 0
-                    );
-                }
+        const currentEpoch = getNetworkStatus().epoch;
+        const nodes = trustedNode
+            ? _status.bobServers
+            : _statusCheckin.bobServers;
+        let servers = Object.keys(nodes).filter((server) => {
+            const node = nodes[server];
+            return isPeerEligible(
+                node?.lastTickChanged || 0,
+                node?.currentProcessingEpoch ?? -1,
+                currentEpoch
             );
-        }
+        });
         // always exclude blacklisted peers from random-peers results
         servers = servers.filter((server) => !_blacklistedPeers.has(server));
 

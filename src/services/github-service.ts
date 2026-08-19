@@ -210,6 +210,12 @@ namespace GithubService {
             }
             let data: GithubTag[] = await response.json();
 
+            // Lite Node releases use the E-epoch tag scheme (E228, E111...).
+            // Anything else in that repo is not a deployable node build.
+            if (service === MongoDbTypes.ServiceType.LiteNode) {
+                data = data.filter((t) => /^E\d+/.test(t.name.trim()));
+            }
+
             // Enrich each tag with its release's binary assets so the deploy UI
             // can pick a specific build. Best-effort: on failure assets stay
             // empty and deploy falls back to the default binary name.

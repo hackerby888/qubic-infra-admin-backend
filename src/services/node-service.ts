@@ -1366,9 +1366,10 @@ namespace NodeService {
     // A servable node must sit within this many ticks of the highest tick we see.
     // Not an exact match: nodes leapfrog every second, which would rewrite the CF pool constantly.
     // Measured over 20 live bob nodes: healthy ones sit 0-2 ticks off the tip, then a sharp cliff
-    // to 76, 633, 11983, 207580. Anything from 5 to 50 splits those two groups identically, so 30
-    // sits in the middle of that plateau: tolerant of transient poll skew, still far below the laggards.
-    const MAX_TICK_LAG = 30;
+    // to 76, 633, 11983, 207580. At ~1.94 ticks/sec this budget is about 33s of tolerated lag, and
+    // leaves roughly 12 ticks of margin below the nearest observed laggard - widen further only with
+    // fresh measurements, since the cliff is what keeps stalled nodes out.
+    const MAX_TICK_LAG = 64;
 
     // Bob nodes fit to serve public bob.qubic.global traffic.
     // System and checkin nodes both qualify, as long as they are alive and at the latest tick.

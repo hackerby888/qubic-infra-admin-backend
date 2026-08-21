@@ -1363,6 +1363,46 @@ namespace NodeService {
         return selectedServers;
     }
 
+    // A servable node must sit within this many ticks of the highest tick we see.
+    // Not an exact match: nodes leapfrog every second, which would rewrite the CF pool constantly.
+    // Measured over 20 live bob nodes: healthy ones sit 0-2 ticks off the tip, then a sharp cliff
+    // to 76, 633, 11983, 207580. Anything from 5 to 50 splits those two groups identically, so 30
+    // sits in the middle of that plateau: tolerant of transient poll skew, still far below the laggards.
+    const MAX_TICK_LAG = 30;
+
+    // Bob nodes fit to serve public bob.qubic.global traffic.
+    // System and checkin nodes both qualify, as long as they are alive and at the latest tick.
+    export function getServableBobNodes(): string[] {
+        const currentEpoch = getNetworkStatus().epoch;
+
+        // System entries last so they win over checkin entries for the same IP.
+        const bobNodes: { [server: string]: BobNodeTickInfo } = {
+            ..._statusCheckin.bobServers,
+            ..._status.bobServers,
+        };
+
+        const privateServers = new Set(_currentBobNodes.filter((node) => node.isPrivate).map((node) => node.server));
+
+        const aliveServers = Object.keys(bobNodes).filter((server) => {
+            if (_blacklistedPeers.has(server) || privateServers.has(server)) {
+                return false;
+            }
+
+            const node = bobNodes[server];
+
+            return isPeerEligible(node?.lastTickChanged || 0, node?.currentProcessingEpoch ?? -1, currentEpoch);
+        });
+
+        if (aliveServers.length === 0) {
+            return [];
+        }
+
+        // isPeerEligible only rejects fully stalled nodes (no tick change in 120s); this drops the merely slow ones.
+        const highestTick = Math.max(...aliveServers.map((server) => bobNodes[server]!.currentFetchingTick));
+
+        return aliveServers.filter((server) => highestTick - bobNodes[server]!.currentFetchingTick <= MAX_TICK_LAG);
+    }
+
     async function watchAndSaveSnapshot() {
         const SAVE_INTERVAL = 5 * 60 * 1000; // 5 minutes
         const WINDOW_SAVE_INTERVAL = 60 * 60 * 1000; // 1 hour

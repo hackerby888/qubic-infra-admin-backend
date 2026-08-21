@@ -47,9 +47,9 @@ namespace CloudflareService {
         return [...kept, ...additions].slice(0, originCap);
     }
 
-    // How many endpoints the pool is provisioned for. Cloudflare rejects a PATCH that exceeds the
-    // subscribed endpoint count, so the live pool is the source of truth rather than a guess.
-    async function fetchPoolOriginCap(): Promise<number> {
+    // Addresses the pool currently serves. Cloudflare rejects a PATCH that exceeds the subscribed
+    // endpoint count, so the live pool is both the size limit and our starting membership.
+    async function fetchPoolOrigins(): Promise<string[]> {
         const response = await fetch(poolUrl(), {
             headers: authHeaders(),
             signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -59,10 +59,9 @@ namespace CloudflareService {
             throw new Error(`${response.status} ${await response.text()}`);
         }
 
-        const body = (await response.json()) as { result?: { origins?: unknown[] } };
-        const originCount = body.result?.origins?.length || 0;
+        const body = (await response.json()) as { result?: { origins?: { address?: string }[] } };
 
-        return Math.max(1, originCount);
+        return (body.result?.origins || []).map((origin) => origin.address || "").filter(Boolean);
     }
 
     async function pushPoolOrigins(members: string[]): Promise<void> {
@@ -108,7 +107,16 @@ namespace CloudflareService {
             }
 
             try {
-                const originCap = isConfigured() ? await fetchPoolOriginCap() : DRY_RUN_ORIGIN_CAP;
+                const poolOrigins = isConfigured() ? await fetchPoolOrigins() : [];
+                const originCap = isConfigured() ? Math.max(1, poolOrigins.length) : DRY_RUN_ORIGIN_CAP;
+
+                // First cycle after a restart: adopt whatever the pool already serves. Otherwise we
+                // would swap out a healthy origin for no reason, and its replacement has to re-pass
+                // the monitor consecutive_up times before it can take traffic.
+                if (_lastPushedServers.length === 0 && poolOrigins.length > 0) {
+                    _lastPushedServers = poolOrigins;
+                }
+
                 const members = selectPoolMembers(servableServers, originCap);
 
                 if (members.join(",") === _lastPushedServers.join(",")) {

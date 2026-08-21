@@ -5,6 +5,10 @@ import { NodeService } from "./node-service.js";
 
 namespace CloudflareService {
     const POOL_SYNC_INTERVAL_MS = 10_000;
+    // Node pollers need a moment after boot to fill _status / _statusCheckin. Syncing before that
+    // sees a half-built fleet and swaps a healthy origin for no reason, and every swap costs the
+    // replacement a monitor consecutive_up warm-up before it can serve.
+    const STARTUP_WARM_UP_MS = 60_000;
     const CLOUDFLARE_API_URL = "https://api.cloudflare.com/client/v4";
     const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -88,6 +92,8 @@ namespace CloudflareService {
     // Keeps the bob.qubic.global load balancer pool in sync with the bob nodes we consider
     // servable. Cloudflare cannot tell which node holds the highest tick, so we decide here.
     async function watchAndSyncBobPool() {
+        await sleep(STARTUP_WARM_UP_MS);
+
         while (true) {
             await sleep(POOL_SYNC_INTERVAL_MS);
 

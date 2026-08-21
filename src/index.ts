@@ -6,6 +6,7 @@ import { Mongodb, IS_NO_DB } from "./database/db.js";
 import { SocketServer } from "./http/socket-server.js";
 import { MapService } from "./services/map-service.js";
 import { LeaderService } from "./services/leader-service.js";
+import { CloudflareService } from "./services/cloudflare-service.js";
 import fs from "fs/promises";
 import { logger } from "./utils/logger.js";
 import { Gmail } from "./utils/gmail.js";
@@ -85,6 +86,7 @@ async function main() {
     await MapService.start();
     await GithubService.start();
     await NodeService.start();
+    await CloudflareService.start();
     const server = await HttpServer.start();
     SocketServer.start(server);
     Gmail.sendServerStartedEmail({

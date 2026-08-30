@@ -367,6 +367,7 @@ export namespace MongoDbTypes {
         lastSeen: Date;
         commit?: string; // deployed git short SHA
         startedAt?: Date; // process start = when this instance was last deployed
+        ip?: string; // instance IP, so the fleet view can name a box by address
     }
 }
 

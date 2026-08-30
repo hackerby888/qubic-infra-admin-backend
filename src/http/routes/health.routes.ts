@@ -17,6 +17,7 @@ router.get("/", (req, res) => {
 router.get("/health", async (req, res) => {
     const base = {
         instanceId: LeaderService.getInstanceId(),
+        ip: BuildInfo.ip,
         leader: LeaderService.isLeader(),
         commit: BuildInfo.commit,
         startedAt: BuildInfo.startedAt.toISOString(),

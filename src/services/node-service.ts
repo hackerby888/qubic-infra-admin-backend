@@ -973,6 +973,7 @@ namespace NodeService {
                             lastSeen: new Date(),
                             commit: BuildInfo.commit,
                             startedAt: BuildInfo.startedAt,
+                            ip: BuildInfo.ip,
                         },
                     },
                     { upsert: true, writeConcern: { w: 1 } }
@@ -1084,6 +1085,9 @@ namespace NodeService {
                                 networkTick,
                                 operator: n.operator,
                             };
+                            const lagMessage =
+                                `${n.server} is ${behindTicks} ticks behind the network ` +
+                                `(stuck at tick ${n.liteTick}, network at ${networkTick})`;
 
                             if (behindTicks > LAG_THRESHOLD_TICKS) {
                                 if (!_laggingNodes.has(key)) {
@@ -1094,7 +1098,7 @@ namespace NodeService {
                                         severity: "warn",
                                         server: n.server,
                                         service: n.service,
-                                        message: `${n.server} is ${behindTicks} ticks behind the network`,
+                                        message: lagMessage,
                                         details: lagDetails,
                                     });
                                 }
@@ -1105,7 +1109,7 @@ namespace NodeService {
                                     severity: "info",
                                     server: n.server,
                                     service: n.service,
-                                    message: `${n.server} caught up with the network`,
+                                    message: `${n.server} caught up with the network at tick ${n.liteTick}`,
                                     details: lagDetails,
                                 });
                             }
@@ -1132,7 +1136,7 @@ namespace NodeService {
                                     severity: "error",
                                     server: n.server,
                                     service: n.service,
-                                    message: `${n.service} ${n.server} is DOWN (unreachable or tick frozen > 2 min)`,
+                                    message: `${n.service} ${n.server} is DOWN (unreachable or tick frozen > 2 min, last tick ${n.liteTick ?? "unknown"})`,
                                     details: { operator: n.operator, lastTick: n.liteTick },
                                 });
                             }
@@ -1649,7 +1653,7 @@ namespace NodeService {
                                     severity: "error",
                                     server: node.server,
                                     service: "liteNode",
-                                    message: `Main node ${node.server} is ${behind} ticks behind`,
+                                    message: `Main node ${node.server} is ${behind} ticks behind (stuck at tick ${node.tick}, network at ${systemTick})`,
                                     details: {
                                         behindTicks: behind,
                                         nodeTick: node.tick,

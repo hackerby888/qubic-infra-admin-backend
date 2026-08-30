@@ -1,4 +1,5 @@
 import { execSync } from "child_process";
+import os from "os";
 
 // Build/version info captured ONCE at process start. Surfaced via /health and
 // the System Health page so you can confirm a deploy actually landed: after a
@@ -19,7 +20,24 @@ try {
     // no git / detached environment — keep the env fallback or "unknown"
 }
 
+// The address this box is reached on, so System Health can name an instance by IP
+// instead of a UUID. Set INSTANCE_IP when the public IP isn't on a local interface.
+function firstExternalIpv4(): string | null {
+    for (const addresses of Object.values(os.networkInterfaces())) {
+        for (const address of addresses ?? []) {
+            if (address.family === "IPv4" && !address.internal) {
+                return address.address;
+            }
+        }
+    }
+
+    return null;
+}
+
+const ip = process.env.INSTANCE_IP || firstExternalIpv4() || "unknown";
+
 export const BuildInfo = {
     commit,
     startedAt,
+    ip,
 };

@@ -67,5 +67,15 @@ jobs:
             npm ci
             npm run build
             pm2 restart "$APP_NAME" --update-env
-            sleep 6
-            curl -fsS http://127.0.0.1:80/health && echo " <- healthy"
+            # The port binds only after the Github/Map/Cloudflare warmups, which regularly
+            # take longer than a fixed sleep — poll instead of guessing.
+            healthy=""
+            for _ in $(seq 1 30); do
+                if curl -fsS http://127.0.0.1:80/health; then
+                    echo " <- healthy"
+                    healthy=1
+                    break
+                fi
+                sleep 2
+            done
+            [ -n "$healthy" ] || { echo "health check failed after 60s"; exit 1; }

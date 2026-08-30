@@ -1,6 +1,7 @@
 import { Mongodb, MongoDbTypes, IS_NO_DB } from "../database/db.js";
 import type { QueryPeersMode } from "../types/type.js";
 import { isNodeActive, isPeerEligible } from "../utils/common.js";
+import { logSystemEvent } from "../utils/system-event.js";
 import { Gmail } from "../utils/gmail.js";
 import type { IpInfo } from "../utils/ip.js";
 import { logger } from "../utils/logger.js";
@@ -1016,9 +1017,11 @@ namespace NodeService {
     const _everSeenUp = new Set<string>(); // "<server>:<service>" seen active once
     const _downNodes = new Set<string>(); // currently down (already alerted)
     const _lastNodeDownAlertAt: Record<string, number> = {};
+    const _laggingNodes = new Set<string>(); // "<server>:<service>" behind the network tick
 
     // Leader-only: email when a managed lite/bob node that was up goes down
-    // (unreachable / tick frozen > 2 min), and again when it recovers.
+    // (unreachable / tick frozen > 2 min), and again when it recovers. Every
+    // transition here (down, recovery, tick lag) also writes a system_events row.
     async function watchNodeDownAlerts() {
         while (true) {
             if (!LeaderService.isLeader()) {
@@ -1028,16 +1031,21 @@ namespace NodeService {
             try {
                 const status = getSystemNodesStatus();
                 const now = Date.now();
+                const networkTick = getNetworkStatus().tick;
                 const nodes = [
                     ...status.liteNodes.map((n) => ({
                         server: n.server,
                         service: "liteNode",
                         up: isNodeActive(n.lastTickChanged),
+                        operator: n.operator,
+                        liteTick: n.tick as number | null,
                     })),
                     ...status.bobNodes.map((n) => ({
                         server: n.server,
                         service: "bobNode",
                         up: isNodeActive(n.lastTickChanged),
+                        operator: n.operator,
+                        liteTick: null as number | null, // bob lag is judged against the bob tip, see getServableBobNodes
                     })),
                 ];
                 const present = new Set(nodes.map((n) => n.server));
@@ -1056,14 +1064,58 @@ namespace NodeService {
                                 server: n.server,
                                 service: n.service,
                             });
+                            logSystemEvent({
+                                type: "node_recovered",
+                                severity: "info",
+                                server: n.server,
+                                service: n.service,
+                                message: `${n.service} ${n.server} is back online`,
+                                details: { operator: n.operator },
+                            });
+                        }
+
+                        // Fleet-wide tick lag, log-only on purpose: non-Main nodes drift in and
+                        // out of lag constantly, so emailing it would drown the alert inbox.
+                        if (n.service === "liteNode" && n.liteTick !== null && n.liteTick !== -1) {
+                            const behindTicks = networkTick - n.liteTick;
+                            const lagDetails = {
+                                behindTicks,
+                                nodeTick: n.liteTick,
+                                networkTick,
+                                operator: n.operator,
+                            };
+
+                            if (behindTicks > LAG_THRESHOLD_TICKS) {
+                                if (!_laggingNodes.has(key)) {
+                                    _laggingNodes.add(key);
+                                    logger.warn(`Node ${n.server} is lagging ${behindTicks} ticks behind the network`);
+                                    logSystemEvent({
+                                        type: "node_lagging",
+                                        severity: "warn",
+                                        server: n.server,
+                                        service: n.service,
+                                        message: `${n.server} is ${behindTicks} ticks behind the network`,
+                                        details: lagDetails,
+                                    });
+                                }
+                            } else if (_laggingNodes.delete(key)) {
+                                logger.info(`Node ${n.server} caught up with the network`);
+                                logSystemEvent({
+                                    type: "node_lag_recovered",
+                                    severity: "info",
+                                    server: n.server,
+                                    service: n.service,
+                                    message: `${n.server} caught up with the network`,
+                                    details: lagDetails,
+                                });
+                            }
                         }
                     } else if (_everSeenUp.has(key)) {
                         // Only alert nodes that were once up (skip never-reached).
                         const last = _lastNodeDownAlertAt[key] || 0;
-                        if (
-                            !_downNodes.has(key) ||
-                            now - last >= NODE_DOWN_ALERT_COOLDOWN_MS
-                        ) {
+                        const wasDown = _downNodes.has(key);
+
+                        if (!wasDown || now - last >= NODE_DOWN_ALERT_COOLDOWN_MS) {
                             _downNodes.add(key);
                             _lastNodeDownAlertAt[key] = now;
                             logger.warn(
@@ -1073,7 +1125,21 @@ namespace NodeService {
                                 server: n.server,
                                 service: n.service,
                             });
+                            // Only the down transition gets a row; the 30-min repeat email would otherwise clone it all outage.
+                            if (!wasDown) {
+                                logSystemEvent({
+                                    type: "node_down",
+                                    severity: "error",
+                                    server: n.server,
+                                    service: n.service,
+                                    message: `${n.service} ${n.server} is DOWN (unreachable or tick frozen > 2 min)`,
+                                    details: { operator: n.operator, lastTick: n.liteTick },
+                                });
+                            }
                         }
+
+                        // A down node isn't "lagging" — drop lag state instead of claiming it recovered.
+                        _laggingNodes.delete(key);
                     }
                 }
 
@@ -1082,6 +1148,11 @@ namespace NodeService {
                     if (!present.has(key.split(":")[0] as string)) {
                         _downNodes.delete(key);
                         delete _lastNodeDownAlertAt[key];
+                    }
+                }
+                for (const key of Array.from(_laggingNodes)) {
+                    if (!present.has(key.split(":")[0] as string)) {
+                        _laggingNodes.delete(key);
                     }
                 }
             } catch (error) {
@@ -1103,6 +1174,8 @@ namespace NodeService {
     // hold the leader lease, so a leader-gated check would never fire. Each
     // instance emails independently on its own down/recovery transition.
     async function watchDbHealth() {
+        const instanceHost = process.env.HOSTNAME || "unknown-host";
+
         while (true) {
             await sleep(DB_HEALTH_CHECK_MS);
             try {
@@ -1117,6 +1190,14 @@ namespace NodeService {
                         )}s`
                     );
                     Gmail.sendDbRecoveredEmail({ downForMs });
+                    logSystemEvent({
+                        type: "db_recovered",
+                        severity: "info",
+                        server: instanceHost,
+                        service: null,
+                        message: `MongoDB recovered after ${Math.round(downForMs / 1000)}s`,
+                        details: { downForMs },
+                    });
                 }
             } catch (error) {
                 _dbConsecutiveFails++;
@@ -1129,6 +1210,15 @@ namespace NodeService {
                     _dbDown = true;
                     _dbDownSince = Date.now();
                     Gmail.sendDbDownEmail({ error: (error as Error).message });
+                    // Best-effort: Mongo is unreachable so this insert will likely fail (and is
+                    // swallowed). The reliable record of an outage is the db_recovered row.
+                    logSystemEvent({
+                        type: "db_down",
+                        severity: "error",
+                        server: instanceHost,
+                        service: null,
+                        message: `MongoDB unreachable: ${(error as Error).message}`,
+                    });
                 }
             }
         }
@@ -1526,9 +1616,9 @@ namespace NodeService {
             }
             try {
                 const systemNodesStatus = NodeService.getSystemNodesStatus();
+                // A -1 tick means "never polled" and would inflate `behind`, so exclude it.
                 const mainNodes = systemNodesStatus.liteNodes.filter(
-                    (node) =>
-                        (node.mainAuxStatus & 1) === 1 && node.epoch != -1
+                    (node) => (node.mainAuxStatus & 1) === 1 && node.epoch != -1 && node.tick !== -1
                 );
                 const systemTick = NodeService.getNetworkStatus().tick;
                 const now = Date.now();
@@ -1544,11 +1634,32 @@ namespace NodeService {
                                 `Main node ${node.server} is lagging behind. System tick: ${systemTick}, Node tick: ${node.tick}`
                             );
                             lastAlertSentAt[node.server] = now;
+
+                            // Only the first transition gets a row; the 30-min repeat email would otherwise clone it all outage.
+                            const wasAlerting = alertingNodes.has(node.server);
                             alertingNodes.add(node.server);
                             Gmail.sendMainNodeLaggingEmail({
                                 behindTicks: behind,
                                 nodeIp: node.server,
                             });
+
+                            if (!wasAlerting) {
+                                logSystemEvent({
+                                    type: "main_node_lagging",
+                                    severity: "error",
+                                    server: node.server,
+                                    service: "liteNode",
+                                    message: `Main node ${node.server} is ${behind} ticks behind`,
+                                    details: {
+                                        behindTicks: behind,
+                                        nodeTick: node.tick,
+                                        systemTick,
+                                        epoch: node.epoch,
+                                        operator: node.operator,
+                                        groupId: node.groupId,
+                                    },
+                                });
+                            }
                         }
                     }
                 }
@@ -1561,6 +1672,13 @@ namespace NodeService {
                             `Main node ${server} has recovered (back in sync).`
                         );
                         Gmail.sendMainNodeRecoveredEmail({ nodeIp: server });
+                        logSystemEvent({
+                            type: "main_node_recovered",
+                            severity: "info",
+                            server,
+                            service: "liteNode",
+                            message: `Main node ${server} is back in sync with the network`,
+                        });
                     }
                 }
             } catch (error) {
@@ -1821,12 +1939,30 @@ namespace NodeService {
                             tick: tickOf(server),
                             timestamp: now,
                         });
+                        const failoverAction = p.desired === "main" ? "promote" : "demote";
+                        const failoverText = failoverAction === "promote" ? "promoted to Main" : "demoted from Main";
+
                         Gmail.sendMainNodeFailoverEmail({
-                            type: p.desired === "main" ? "promote" : "demote",
+                            type: failoverAction,
                             server,
                             groupId: p.groupId,
                             reason: p.reason,
                             tick: tickOf(server),
+                        });
+                        logSystemEvent({
+                            type: "main_node_failover",
+                            severity: "warn",
+                            server,
+                            service: "liteNode",
+                            message: `${server} ${failoverText} in group ${p.groupId.slice(0, 8)}`,
+                            details: {
+                                action: failoverAction,
+                                groupId: p.groupId,
+                                operator: p.operator,
+                                reason: p.reason,
+                                tick: tickOf(server),
+                                attempts: p.attempts,
+                            },
                         });
                     } else if (now - p.lastTryAt >= F12_RETRY_INTERVAL_MS) {
                         if (p.attempts >= F12_MAX_ATTEMPTS) {

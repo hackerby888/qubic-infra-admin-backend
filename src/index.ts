@@ -10,6 +10,7 @@ import { CloudflareService } from "./services/cloudflare-service.js";
 import fs from "fs/promises";
 import { logger } from "./utils/logger.js";
 import { Gmail } from "./utils/gmail.js";
+import { logSystemEvent } from "./utils/system-event.js";
 
 function checkEnvVariables() {
     const requiredVars = [
@@ -60,9 +61,21 @@ async function handleShutdown(signal: string) {
     shuttingDown = true;
     // Release leadership first so a standby takes over within a renew tick.
     await LeaderService.resign();
+    const instanceHost = process.env.HOSTNAME || "unknown-host";
     try {
+        // Email and event row share one 5s budget — the process exits right after.
         await Promise.race([
-            Gmail.sendServerStoppedEmail({ reason: signal }),
+            Promise.all([
+                Gmail.sendServerStoppedEmail({ reason: signal }),
+                logSystemEvent({
+                    type: "backend_stopped",
+                    severity: "warn",
+                    server: instanceHost,
+                    service: null,
+                    message: `Backend on ${instanceHost} is shutting down (${signal})`,
+                    details: { reason: signal },
+                }),
+            ]),
             new Promise((resolve) => setTimeout(resolve, 5_000)),
         ]);
     } catch (err: any) {
@@ -89,9 +102,16 @@ async function main() {
     await CloudflareService.start();
     const server = await HttpServer.start();
     SocketServer.start(server);
-    Gmail.sendServerStartedEmail({
-        port: process.env.PORT || "unknown",
-    }).catch(() => {});
+    const port = process.env.PORT || "unknown";
+    Gmail.sendServerStartedEmail({ port }).catch(() => {});
+    logSystemEvent({
+        type: "backend_started",
+        severity: "info",
+        server: process.env.HOSTNAME || "unknown-host",
+        service: null,
+        message: `Backend started on port ${port}`,
+        details: { port },
+    });
 }
 
 main();

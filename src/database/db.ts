@@ -1,4 +1,4 @@
-import { MongoClient, Db, Collection } from "mongodb";
+import { MongoClient, Db, Collection, ObjectId } from "mongodb";
 import { logger } from "../utils/logger.js";
 import type { IpInfo } from "../utils/ip.js";
 
@@ -278,6 +278,33 @@ export namespace MongoDbTypes {
         timestamp: number;
     }
 
+    // Alert/incident history for the System Events admin view, written at the same
+    // transitions that already send an alert email.
+    export interface SystemEvent {
+        _id?: ObjectId;
+        type: SystemEventType;
+        severity: "error" | "warn" | "info";
+        server: string | null; // node IP, backend host, or null
+        service: string | null; // "liteNode" | "bobNode" | null
+        message: string; // one-line human summary
+        details?: Record<string, unknown>; // behindTicks, downForMs, reason, ...
+        createdAt: Date; // TTL field — must be a Date; the numeric `timestamp` cannot drive a TTL index
+        timestamp: number; // epoch ms, for the frontend (matches CrashReport)
+    }
+
+    export type SystemEventType =
+        | "node_down"
+        | "node_recovered"
+        | "node_lagging"
+        | "node_lag_recovered"
+        | "main_node_lagging"
+        | "main_node_recovered"
+        | "main_node_failover"
+        | "db_down"
+        | "db_recovered"
+        | "backend_started"
+        | "backend_stopped";
+
     export interface BlacklistedPeer {
         ip: string;
         note?: string;
@@ -465,6 +492,14 @@ export namespace Mongodb {
                 { expireAfterSeconds: 30 }
             )
         );
+
+        // Alert history: keep 31 days — one day past the longest UI filter.
+        await idx("system_events.ttl", () =>
+            getSystemEventsCollection().createIndex({ createdAt: 1 }, { expireAfterSeconds: 31 * 24 * 60 * 60 })
+        );
+        await idx("system_events.timestamp", () =>
+            getSystemEventsCollection().createIndex({ timestamp: -1 })
+        );
     }
 
     export async function disconnectDB() {
@@ -486,6 +521,10 @@ export namespace Mongodb {
 
     export function getCrashReportsCollection() {
         return getDB().collection<MongoDbTypes.CrashReport>("crash_reports");
+    }
+
+    export function getSystemEventsCollection() {
+        return getDB().collection<MongoDbTypes.SystemEvent>("system_events");
     }
 
     export function getBlacklistedPeersCollection() {

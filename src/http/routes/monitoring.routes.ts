@@ -2,7 +2,7 @@ import express from "express";
 import { NodeService } from "../../services/node-service.js";
 import { Mongodb, MongoDbTypes, IS_NO_DB } from "../../database/db.js";
 import { logger } from "../../utils/logger.js";
-import { lastCheckinMap } from "../../utils/common.js";
+import { lastCheckinMap, parseExcludeParam } from "../../utils/common.js";
 import { MapService } from "../../services/map-service.js";
 import { Checkin } from "../../services/logic/checkin.js";
 import type { QueryPeersMode } from "../../types/type.js";
@@ -30,13 +30,15 @@ router.get("/random-peers", async (req, res) => {
             (req.query.mode as QueryPeersMode) || "random";
         const trustedNode: boolean = req.query.trustedNode === "true";
         let service = req.query.service as MongoDbTypes.ServiceType;
+        // peers the client already holds or has banned on its side
+        const exclude = parseExcludeParam(req.query.exclude);
 
         if (service == MongoDbTypes.ServiceType.LiteNode) {
             let peers = NodeService.getRandomLiteNode(expectedLitePeersLength, {
                 mode,
                 clientIpInfo: clientIpInfo,
                 trustedNode,
-                filterOut: [clientIpV4 as string],
+                filterOut: [clientIpV4 as string, ...exclude],
             });
             res.json({ peers: peers });
         } else if (service == MongoDbTypes.ServiceType.BobNode) {
@@ -47,7 +49,7 @@ router.get("/random-peers", async (req, res) => {
                     clientIpInfo: clientIpInfo,
                     mode,
                     trustedNode,
-                    filterOut: [clientIpV4 as string],
+                    filterOut: [clientIpV4 as string, ...exclude],
                 }
             );
             let bobPeers = NodeService.getRandomBobNode(
@@ -55,7 +57,7 @@ router.get("/random-peers", async (req, res) => {
                 {
                     clientIpInfo: clientIpInfo,
                     mode,
-                    filterOut: [...litePeers, clientIpV4 as string],
+                    filterOut: [...litePeers, clientIpV4 as string, ...exclude],
                     trustedNode,
                 }
             );

@@ -1,3 +1,5 @@
+import { isIPv4 } from "net";
+
 export const lastCheckinMap: Record<string, number> = {};
 
 // Convert server string (eg. "127.0.0.1@root 128.0.0.1@root" to ["127.0.0.1", "128.0.0.1"])
@@ -89,6 +91,19 @@ export function isPeerEligible(
         epoch === currentEpoch &&
         isNodeActive(lastTickChanged)
     );
+}
+
+// Public endpoint: keep the exclude list bounded
+export const MAX_EXCLUDE_PEERS = 64;
+
+// /random-peers?exclude=ip,ip,... -> deduped IPv4 list, anything else dropped
+export function parseExcludeParam(raw: unknown): string[] {
+    const ips = String(raw ?? "")
+        .split(",")
+        .map((ip) => ip.trim())
+        .filter((ip) => isIPv4(ip));
+
+    return [...new Set(ips)].slice(0, MAX_EXCLUDE_PEERS);
 }
 
 export function mongodbOperatorSelection(operator: string) {

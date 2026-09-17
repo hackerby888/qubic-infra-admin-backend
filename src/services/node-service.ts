@@ -1376,10 +1376,7 @@ namespace NodeService {
         // always exclude blacklisted peers from random-peers results
         servers = servers.filter((server) => !_blacklistedPeers.has(server));
 
-        if (n >= servers.length) {
-            return servers;
-        }
-
+        // filter out servers in filterOut list (before the small-pool shortcut, same as lite nodes)
         servers = servers.filter((server) => !filterOut.includes(server));
 
         if (n >= servers.length) {

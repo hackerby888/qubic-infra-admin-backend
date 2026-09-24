@@ -11,6 +11,7 @@ import { Checkin } from "./logic/checkin.js";
 import { SSHService } from "./ssh-service.js";
 import { LeaderService } from "./leader-service.js";
 import { BuildInfo } from "../utils/build-info.js";
+import { QubicP2P } from "../utils/qubic-p2p.js";
 import * as geolib from "geolib";
 import { isIPv4 } from "net";
 import fs from "fs/promises";
@@ -34,6 +35,7 @@ namespace NodeService {
         groupId: string;
         isPrivate?: boolean;
         isSavingSnapshot: boolean;
+        p2pStrikes?: number;
     }
 
     export interface BobNodeTickInfo {
@@ -49,6 +51,7 @@ namespace NodeService {
         lastTickChanged: number;
         bobVersion: string;
         isPrivate?: boolean;
+        p2pStrikes?: number;
     }
 
     interface LiteNodeExtended extends MongoDbTypes.LiteNode {
@@ -471,6 +474,7 @@ namespace NodeService {
                             oldTick !== tickInfo.tick
                                 ? Date.now()
                                 : serverObject?.lastTickChanged || -1,
+                        p2pStrikes: serverObject?.p2pStrikes ?? 0,
                     };
                 }
             });
@@ -592,6 +596,7 @@ namespace NodeService {
                                 ? Date.now()
                                 : serverObject?.lastTickChanged || -1,
                         bobVersion: tickInfo.bobVersion || "unknown",
+                        p2pStrikes: serverObject?.p2pStrikes ?? 0,
                     };
                 }
             });
@@ -667,6 +672,131 @@ namespace NodeService {
 
         systemNodesProcessor();
         checkinNodesProcessor();
+    }
+
+    // Consecutive failed p2p probes before a node leaves random-peers; one passing probe clears them.
+    const P2P_MAX_STRIKES = 3;
+    const P2P_PROBE_INTERVAL_MS = 60_000;
+    // Tick info (24B) every round; tick data (~139KB/node) only every Nth round to keep leader bandwidth ~5x lower.
+    const P2P_TICK_DATA_EVERY_N_ROUNDS = 5;
+    // Fewest probed system nodes for the leader-outage canary to be meaningful.
+    const P2P_CANARY_MIN_NODES = 4;
+
+    function isP2pHealthy(node?: { p2pStrikes?: number }) {
+        return (node?.p2pStrikes ?? 0) < P2P_MAX_STRIKES;
+    }
+
+    function p2pProbeTarget<T extends LiteNodeTickInfo | BobNodeTickInfo>(
+        label: string,
+        port: number,
+        isSystem: boolean,
+        getNodes: () => { [server: string]: T },
+        getEpoch: (node: T) => number
+    ) {
+        return {
+            label,
+            port,
+            isSystem,
+            getNodes,
+            // Servers whose last tick data check failed; they get tick data again next round, not only on tick data rounds.
+            recheckTickData: new Set<string>(),
+            // Only nodes random-peers could hand out are worth probing; the rest are already filtered by HTTP liveness.
+            getEligibleServers: () => {
+                const nodes = getNodes();
+                const currentEpoch = getNetworkStatus().epoch;
+                return Object.keys(nodes).filter((server) =>
+                    isPeerEligible(nodes[server]!.lastTickChanged || 0, getEpoch(nodes[server]!), currentEpoch)
+                );
+            },
+        };
+    }
+
+    // HTTP liveness says nothing about the p2p port peers actually dial, so probe it with real requests.
+    async function watchP2pHealth() {
+        const targets = [
+            p2pProbeTarget("lite system", QubicP2P.LITE_PORT, true, () => _status.liteServers, (node) => node.epoch),
+            p2pProbeTarget("lite checkin", QubicP2P.LITE_PORT, false, () => _statusCheckin.liteServers, (node) => node.epoch),
+            p2pProbeTarget("bob system", QubicP2P.BOB_PORT, true, () => _status.bobServers, (node) => node.currentProcessingEpoch),
+            p2pProbeTarget("bob checkin", QubicP2P.BOB_PORT, false, () => _statusCheckin.bobServers, (node) => node.currentProcessingEpoch),
+        ];
+        let round = 0;
+
+        while (true) {
+            await sleep(P2P_PROBE_INTERVAL_MS);
+            if (!LeaderService.isLeader()) {
+                round = 0;
+                targets.forEach((target) => target.recheckTickData.clear());
+                continue;
+            }
+
+            try {
+                const isTickDataRound = round++ % P2P_TICK_DATA_EVERY_N_ROUNDS === 0;
+                const startTime = Date.now();
+
+                // Probe everything first; strikes are applied only once the round is judged trustworthy.
+                const probed = await Promise.all(
+                    targets.map(async (target) => {
+                        const servers = target.getEligibleServers();
+                        const checksTickData = servers.map((server) => isTickDataRound || target.recheckTickData.has(server));
+                        const results = await Promise.all(
+                            servers.map((server, index) => QubicP2P.probe(server, target.port, checksTickData[index]!))
+                        );
+                        return { target, servers, checksTickData, results };
+                    })
+                );
+
+                // Our own system nodes answer HTTP (they are eligible), so most of them silent on p2p points at the leader's network.
+                const systemResults = probed.filter(({ target }) => target.isSystem).flatMap(({ results }) => results);
+                const systemSilent = systemResults.filter((result) => result === "no-tick-info").length;
+                if (systemResults.length >= P2P_CANARY_MIN_NODES && systemSilent * 2 > systemResults.length) {
+                    logger.warn(
+                        `P2P probe: ${systemSilent}/${systemResults.length} system nodes silent, assuming a leader-side network issue; no strikes this round`
+                    );
+                    continue;
+                }
+
+                let tickDataChecks = 0;
+                const summary = probed.map(({ target, servers, checksTickData, results }) => {
+                    const nextRecheckTickData = new Set<string>();
+                    let struckOut = 0;
+
+                    results.forEach((result, index) => {
+                        const server = servers[index]!;
+                        if (checksTickData[index]) {
+                            tickDataChecks++;
+                        }
+                        // Tick data went untested on "no-tick-info"/"busy", so the previous verdict stands
+                        const tickDataUntested = result === "no-tick-info" || result === "busy";
+                        if (result === "no-tick-data" || (tickDataUntested && target.recheckTickData.has(server))) {
+                            nextRecheckTickData.add(server);
+                        }
+
+                        // Re-read after the await: the HTTP pollers replace node objects every second
+                        const node = target.getNodes()[server];
+                        if (!node) {
+                            return;
+                        }
+                        if (result === "ok") {
+                            node.p2pStrikes = 0;
+                        } else if (result !== "busy") {
+                            node.p2pStrikes = (node.p2pStrikes ?? 0) + 1;
+                        }
+                        if (!isP2pHealthy(node)) {
+                            struckOut++;
+                        }
+                    });
+
+                    target.recheckTickData = nextRecheckTickData;
+                    return `${target.label} ${struckOut}/${servers.length}`;
+                });
+
+                logger.info(
+                    `P2P probe (struck out/probed): ${summary.join(", ")}; ${tickDataChecks} tick data checks in ${Date.now() - startTime}ms`
+                );
+            } catch (error) {
+                logger.error(`Error in p2p health probe: ${(error as Error).message}`);
+            }
+        }
     }
 
     export async function requestShutdownAllLiteNodes() {
@@ -1250,10 +1380,12 @@ namespace NodeService {
             : _statusCheckin.liteServers;
         let servers = Object.keys(nodes).filter((server) => {
             const node = nodes[server];
-            return isPeerEligible(
-                node?.lastTickChanged || 0,
-                node?.epoch ?? -1,
-                currentEpoch
+            return (
+                isPeerEligible(
+                    node?.lastTickChanged || 0,
+                    node?.epoch ?? -1,
+                    currentEpoch
+                ) && isP2pHealthy(node)
             );
         });
 
@@ -1367,10 +1499,12 @@ namespace NodeService {
             : _statusCheckin.bobServers;
         let servers = Object.keys(nodes).filter((server) => {
             const node = nodes[server];
-            return isPeerEligible(
-                node?.lastTickChanged || 0,
-                node?.currentProcessingEpoch ?? -1,
-                currentEpoch
+            return (
+                isPeerEligible(
+                    node?.lastTickChanged || 0,
+                    node?.currentProcessingEpoch ?? -1,
+                    currentEpoch
+                ) && isP2pHealthy(node)
             );
         });
         // always exclude blacklisted peers from random-peers results
@@ -2299,6 +2433,7 @@ namespace NodeService {
         // non-leaders fill _status from the snapshot loop below.
         watchLiteNodes();
         watchBobNodes();
+        watchP2pHealth();
         if (!IS_NO_DB) {
             // All instances: publish/consume the realtime snapshot + converge
             // server/blacklist/ssh-port caches.

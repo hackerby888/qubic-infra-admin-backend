@@ -35,7 +35,8 @@ namespace NodeService {
         groupId: string;
         isPrivate?: boolean;
         isSavingSnapshot: boolean;
-        p2pStrikes?: number;
+        p2pBanned?: boolean;
+        p2pStreak?: number;
     }
 
     export interface BobNodeTickInfo {
@@ -51,7 +52,8 @@ namespace NodeService {
         lastTickChanged: number;
         bobVersion: string;
         isPrivate?: boolean;
-        p2pStrikes?: number;
+        p2pBanned?: boolean;
+        p2pStreak?: number;
     }
 
     interface LiteNodeExtended extends MongoDbTypes.LiteNode {
@@ -474,7 +476,8 @@ namespace NodeService {
                             oldTick !== tickInfo.tick
                                 ? Date.now()
                                 : serverObject?.lastTickChanged || -1,
-                        p2pStrikes: serverObject?.p2pStrikes ?? 0,
+                        p2pBanned: serverObject?.p2pBanned ?? false,
+                        p2pStreak: serverObject?.p2pStreak ?? 0,
                     };
                 }
             });
@@ -596,7 +599,8 @@ namespace NodeService {
                                 ? Date.now()
                                 : serverObject?.lastTickChanged || -1,
                         bobVersion: tickInfo.bobVersion || "unknown",
-                        p2pStrikes: serverObject?.p2pStrikes ?? 0,
+                        p2pBanned: serverObject?.p2pBanned ?? false,
+                        p2pStreak: serverObject?.p2pStreak ?? 0,
                     };
                 }
             });
@@ -674,22 +678,36 @@ namespace NodeService {
         checkinNodesProcessor();
     }
 
-    // Consecutive failed p2p probes before a node leaves random-peers; one passing probe clears them.
-    const P2P_MAX_STRIKES = 3;
+    // Consecutive failed p2p probes that ban a node from random-peers, and consecutive passes that unban it.
+    const P2P_BAN_STRIKES = 3;
+    const P2P_UNBAN_PASSES = 3;
     const P2P_PROBE_INTERVAL_MS = 60_000;
     // Tick info (24B) every round; tick data (~139KB/node) only every Nth round to keep leader bandwidth ~5x lower.
     const P2P_TICK_DATA_EVERY_N_ROUNDS = 5;
     // Fewest probed system nodes for the leader-outage canary to be meaningful.
     const P2P_CANARY_MIN_NODES = 4;
 
-    function isP2pHealthy(node?: { p2pStrikes?: number }) {
-        return (node?.p2pStrikes ?? 0) < P2P_MAX_STRIKES;
+    function isP2pHealthy(node?: { p2pBanned?: boolean }) {
+        return !node?.p2pBanned;
+    }
+
+    // Streak counts consecutive results arguing to flip the current state; the opposite result resets it.
+    // Returns true when this result flipped the node between banned and unbanned.
+    function applyP2pResult(node: { p2pBanned?: boolean; p2pStreak?: number }, ok: boolean): boolean {
+        const argueFlip = node.p2pBanned ? ok : !ok;
+        node.p2pStreak = argueFlip ? (node.p2pStreak ?? 0) + 1 : 0;
+        if (node.p2pStreak < (node.p2pBanned ? P2P_UNBAN_PASSES : P2P_BAN_STRIKES)) {
+            return false;
+        }
+        node.p2pBanned = !node.p2pBanned;
+        node.p2pStreak = 0;
+        return true;
     }
 
     // Why a node is kept out of the /random-peers pool, or null when it can be handed out.
     function peerPoolRejection(
         server: string,
-        node: { lastTickChanged: number; p2pStrikes?: number } | undefined,
+        node: { lastTickChanged: number; p2pBanned?: boolean } | undefined,
         epoch: number | undefined,
         currentEpoch: number
     ): "http" | "blacklist" | "p2p" | null {
@@ -705,14 +723,14 @@ namespace NodeService {
         return null;
     }
 
-    const PEER_POOL_STAT_KEY = { http: "httpDead", blacklist: "blacklisted", p2p: "p2pStruckOut" } as const;
+    const PEER_POOL_STAT_KEY = { http: "httpDead", blacklist: "blacklisted", p2p: "p2pBanned" } as const;
 
     // Pool sizes behind /random-peers (system = trustedNode=true, checkin = default). Per-client filters (own IP, exclude) not applied.
     export function getPeerPoolStats() {
         const currentEpoch = getNetworkStatus().epoch;
 
         const poolStats = <T extends LiteNodeTickInfo | BobNodeTickInfo>(nodes: { [server: string]: T }, getEpoch: (node: T) => number) => {
-            const stats = { total: 0, httpDead: 0, blacklisted: 0, p2pStruckOut: 0, legit: 0 };
+            const stats = { total: 0, httpDead: 0, blacklisted: 0, p2pBanned: 0, legit: 0 };
             for (const [server, node] of Object.entries(nodes)) {
                 const rejection = peerPoolRejection(server, node, getEpoch(node), currentEpoch);
                 stats.total++;
@@ -781,11 +799,15 @@ namespace NodeService {
                 const isTickDataRound = round++ % P2P_TICK_DATA_EVERY_N_ROUNDS === 0;
                 const startTime = Date.now();
 
-                // Probe everything first; strikes are applied only once the round is judged trustworthy.
+                // Probe everything first; results are applied only once the round is judged trustworthy.
                 const probed = await Promise.all(
                     targets.map(async (target) => {
+                        const nodes = target.getNodes();
                         const servers = target.getEligibleServers();
-                        const checksTickData = servers.map((server) => isTickDataRound || target.recheckTickData.has(server));
+                        // Banned nodes must pass the full check, tick data included, to earn their way back
+                        const checksTickData = servers.map(
+                            (server) => isTickDataRound || target.recheckTickData.has(server) || Boolean(nodes[server]?.p2pBanned)
+                        );
                         const results = await Promise.all(
                             servers.map((server, index) => QubicP2P.probe(server, target.port, checksTickData[index]!))
                         );
@@ -798,15 +820,16 @@ namespace NodeService {
                 const systemSilent = systemResults.filter((result) => result === "no-tick-info").length;
                 if (systemResults.length >= P2P_CANARY_MIN_NODES && systemSilent * 2 > systemResults.length) {
                     logger.warn(
-                        `P2P probe: ${systemSilent}/${systemResults.length} system nodes silent, assuming a leader-side network issue; no strikes this round`
+                        `P2P probe: ${systemSilent}/${systemResults.length} system nodes silent, assuming a leader-side network issue; no bans/unbans this round`
                     );
                     continue;
                 }
 
                 let tickDataChecks = 0;
+                const flips: string[] = [];
                 const summary = probed.map(({ target, servers, checksTickData, results }) => {
                     const nextRecheckTickData = new Set<string>();
-                    let struckOut = 0;
+                    let banned = 0;
 
                     results.forEach((result, index) => {
                         const server = servers[index]!;
@@ -824,23 +847,25 @@ namespace NodeService {
                         if (!node) {
                             return;
                         }
-                        if (result === "ok") {
-                            node.p2pStrikes = 0;
-                        } else if (result !== "busy") {
-                            node.p2pStrikes = (node.p2pStrikes ?? 0) + 1;
+                        // "busy" is alive but unproven, so it moves neither way
+                        if (result !== "busy" && applyP2pResult(node, result === "ok")) {
+                            flips.push(`${target.label} ${server} ${node.p2pBanned ? "banned" : "unbanned"}`);
                         }
                         if (!isP2pHealthy(node)) {
-                            struckOut++;
+                            banned++;
                         }
                     });
 
                     target.recheckTickData = nextRecheckTickData;
-                    return `${target.label} ${struckOut}/${servers.length}`;
+                    return `${target.label} ${banned}/${servers.length}`;
                 });
 
                 logger.info(
-                    `P2P probe (struck out/probed): ${summary.join(", ")}; ${tickDataChecks} tick data checks in ${Date.now() - startTime}ms`
+                    `P2P probe (banned/probed): ${summary.join(", ")}; ${tickDataChecks} tick data checks in ${Date.now() - startTime}ms`
                 );
+                if (flips.length > 0) {
+                    logger.info(`P2P probe changes: ${flips.join(", ")}`);
+                }
             } catch (error) {
                 logger.error(`Error in p2p health probe: ${(error as Error).message}`);
             }

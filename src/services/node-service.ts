@@ -686,6 +686,54 @@ namespace NodeService {
         return (node?.p2pStrikes ?? 0) < P2P_MAX_STRIKES;
     }
 
+    // Why a node is kept out of the /random-peers pool, or null when it can be handed out.
+    function peerPoolRejection(
+        server: string,
+        node: { lastTickChanged: number; p2pStrikes?: number } | undefined,
+        epoch: number | undefined,
+        currentEpoch: number
+    ): "http" | "blacklist" | "p2p" | null {
+        if (!isPeerEligible(node?.lastTickChanged || 0, epoch ?? -1, currentEpoch)) {
+            return "http";
+        }
+        if (_blacklistedPeers.has(server)) {
+            return "blacklist";
+        }
+        if (!isP2pHealthy(node)) {
+            return "p2p";
+        }
+        return null;
+    }
+
+    const PEER_POOL_STAT_KEY = { http: "httpDead", blacklist: "blacklisted", p2p: "p2pStruckOut" } as const;
+
+    // Pool sizes behind /random-peers (system = trustedNode=true, checkin = default). Per-client filters (own IP, exclude) not applied.
+    export function getPeerPoolStats() {
+        const currentEpoch = getNetworkStatus().epoch;
+
+        const poolStats = <T extends LiteNodeTickInfo | BobNodeTickInfo>(nodes: { [server: string]: T }, getEpoch: (node: T) => number) => {
+            const stats = { total: 0, httpDead: 0, blacklisted: 0, p2pStruckOut: 0, legit: 0 };
+            for (const [server, node] of Object.entries(nodes)) {
+                const rejection = peerPoolRejection(server, node, getEpoch(node), currentEpoch);
+                stats.total++;
+                stats[rejection ? PEER_POOL_STAT_KEY[rejection] : "legit"]++;
+            }
+            return stats;
+        };
+
+        return {
+            epoch: currentEpoch,
+            lite: {
+                system: poolStats(_status.liteServers, (node) => node.epoch),
+                checkin: poolStats(_statusCheckin.liteServers, (node) => node.epoch),
+            },
+            bob: {
+                system: poolStats(_status.bobServers, (node) => node.currentProcessingEpoch),
+                checkin: poolStats(_statusCheckin.bobServers, (node) => node.currentProcessingEpoch),
+            },
+        };
+    }
+
     function p2pProbeTarget<T extends LiteNodeTickInfo | BobNodeTickInfo>(
         label: string,
         port: number,
@@ -1378,19 +1426,9 @@ namespace NodeService {
         const nodes = trustedNode
             ? _status.liteServers
             : _statusCheckin.liteServers;
-        let servers = Object.keys(nodes).filter((server) => {
-            const node = nodes[server];
-            return (
-                isPeerEligible(
-                    node?.lastTickChanged || 0,
-                    node?.epoch ?? -1,
-                    currentEpoch
-                ) && isP2pHealthy(node)
-            );
-        });
-
-        // always exclude blacklisted peers from random-peers results
-        servers = servers.filter((server) => !_blacklistedPeers.has(server));
+        let servers = Object.keys(nodes).filter(
+            (server) => peerPoolRejection(server, nodes[server], nodes[server]?.epoch, currentEpoch) === null
+        );
 
         // filter out servers in filterOut list
         servers = servers.filter((server) => !filterOut.includes(server));
@@ -1497,18 +1535,9 @@ namespace NodeService {
         const nodes = trustedNode
             ? _status.bobServers
             : _statusCheckin.bobServers;
-        let servers = Object.keys(nodes).filter((server) => {
-            const node = nodes[server];
-            return (
-                isPeerEligible(
-                    node?.lastTickChanged || 0,
-                    node?.currentProcessingEpoch ?? -1,
-                    currentEpoch
-                ) && isP2pHealthy(node)
-            );
-        });
-        // always exclude blacklisted peers from random-peers results
-        servers = servers.filter((server) => !_blacklistedPeers.has(server));
+        let servers = Object.keys(nodes).filter(
+            (server) => peerPoolRejection(server, nodes[server], nodes[server]?.currentProcessingEpoch, currentEpoch) === null
+        );
 
         // filter out servers in filterOut list (before the small-pool shortcut, same as lite nodes)
         servers = servers.filter((server) => !filterOut.includes(server));

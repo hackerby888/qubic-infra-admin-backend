@@ -78,6 +78,20 @@ router.get("/random-peers", async (req, res) => {
     }
 });
 
+// Public: how many peers /random-peers can hand out, and why the rest are filtered
+router.get("/random-peers/stats", (_, res) => {
+    try {
+        res.json(NodeService.getPeerPoolStats());
+    } catch (error) {
+        logger.error(
+            `Error fetching random peers stats: ${(error as Error).message}`
+        );
+        res.status(500).json({
+            error: "Failed to fetch random peers stats " + error,
+        });
+    }
+});
+
 router.post("/checkin", async (req, res) => {
     try {
         let body = req.body;
